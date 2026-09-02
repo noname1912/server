@@ -1,0 +1,12 @@
+# ============================================================
+#  ESP32 Music Player Server — Python Dependencies
+#  Cai dat: pip install -r requirements.txt
+# ============================================================
+
+Flask>=3.0.0
+Flask-Cors>=4.0.0
+Pillow>=10.0.0
+yt-dlp>=2024.8.6
+requests>=2.31.0
+mutagen>=1.47.0
+Werkzeug>=3.0.0
