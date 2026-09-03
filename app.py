@@ -62,6 +62,11 @@ def search():
     print(f"[Search] q={q!r} platform={platform} limit={limit}")
     try:
         results = PLATFORMS[platform].search(q, limit=limit)
+        # Lưu kết quả tìm kiếm vào danh sách phát (Playlist) để tự động Next bài
+        global _playlist, _playlist_idx
+        with _player_lock:
+            _playlist = list(results)
+            _playlist_idx = 0
         return jsonify(results)
     except Exception as e:
         print(f"[Search] Error: {e}")
@@ -318,6 +323,8 @@ def platforms_info():
 # ─── Player Hub (Điều phối ESP32 Màn hình & ESP32 Loa) ─────────
 
 _player_lock = threading.Lock()
+_playlist: list[dict] = []
+_playlist_idx: int = 0
 _player_state = {
     "state": "stopped",      # "playing", "paused", "stopped"
     "seq": 0,                # Tăng mỗi khi bài đổi để ESP32 loa nhận diện bài mới
@@ -327,6 +334,24 @@ _player_state = {
     "elapsed": 0,            # Giây đã phát
     "last_update": 0,
 }
+
+def _auto_play_next() -> bool:
+    global _playlist, _playlist_idx
+    if not _playlist:
+        return False
+    _playlist_idx = (_playlist_idx + 1) % len(_playlist)
+    next_song = _playlist[_playlist_idx]
+    platform = str(next_song.get("platform", "youtube")).lower()
+    song_id  = str(next_song.get("id", "")).strip()
+    if not song_id:
+        return False
+    _player_state["seq"] += 1
+    _player_state["state"] = "playing"
+    _player_state["stream_url"] = f"/api/stream/{platform}/{song_id}"
+    _player_state["song"] = next_song
+    _player_state["elapsed"] = 0
+    print(f"[PlayerHub-AutoNext] Auto-play #{_player_state['seq']}: {next_song.get('title')} ({platform})")
+    return True
 
 
 @app.route("/api/player/play", methods=["POST"])
@@ -347,6 +372,23 @@ def player_play():
     stream_url = f"/api/stream/{platform}/{song_id}"
 
     with _player_lock:
+        # Cập nhật vị trí bài trong playlist nếu có
+        global _playlist, _playlist_idx
+        for i, s in enumerate(_playlist):
+            if str(s.get("id")) == song_id:
+                _playlist_idx = i
+                break
+        else:
+            _playlist.append({
+                "id": song_id,
+                "platform": platform,
+                "title": data.get("title", "Unknown"),
+                "artist": data.get("artist", "Unknown"),
+                "thumbnail": data.get("thumbnail", ""),
+                "duration": int(data.get("duration", 0)),
+            })
+            _playlist_idx = len(_playlist) - 1
+
         _player_state["seq"] += 1
         _player_state["state"] = "playing"
         _player_state["stream_url"] = stream_url
@@ -384,13 +426,14 @@ def player_control():
             _player_state["stream_url"] = ""
             _player_state["song"] = None
         elif action == "vol_up":
-            _player_state["volume"] = min(21, _player_state["volume"] + 1)
+            _player_state["volume"] = min(21, _player_state["volume"] + 2)
         elif action == "vol_down":
-            _player_state["volume"] = max(0, _player_state["volume"] - 1)
+            _player_state["volume"] = max(0, _player_state["volume"] - 2)
         elif action == "set_vol":
             _player_state["volume"] = max(0, min(21, int(data.get("value", 15))))
         elif action == "next":
-            _player_state["state"] = "next_requested"
+            if not _auto_play_next():
+                _player_state["state"] = "next_requested"
 
     print(f"[PlayerHub] CONTROL: {action} (vol={_player_state['volume']}, state={_player_state['state']})")
     return jsonify({"status": "ok", "state": _player_state["state"], "volume": _player_state["volume"]})
@@ -436,8 +479,9 @@ def player_report():
         if elapsed is not None:
             _player_state["elapsed"] = int(elapsed)
         if event == "eof":
-            print(f"[PlayerHub] Song finished (EOF) -> Requesting Next Song")
-            _player_state["state"] = "next_requested"
+            print(f"[PlayerHub] Song finished (EOF) -> Auto-Next...")
+            if not _auto_play_next():
+                _player_state["state"] = "next_requested"
 
     return jsonify({"status": "ok"})
 
