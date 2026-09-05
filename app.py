@@ -471,6 +471,7 @@ def player_report():
     POST /api/player/report
     Body: {"elapsed": 45, "event": "eof|error|playing"}
     """
+    import time as _time
     data = request.get_json(force=True, silent=True) or {}
     elapsed = data.get("elapsed")
     event   = data.get("event")
@@ -478,10 +479,26 @@ def player_report():
     with _player_lock:
         if elapsed is not None:
             _player_state["elapsed"] = int(elapsed)
+
         if event == "eof":
-            print(f"[PlayerHub] Song finished (EOF) -> Auto-Next...")
-            if not _auto_play_next():
-                _player_state["state"] = "next_requested"
+            cur_elapsed = int(elapsed or 0)
+            # Bỏ qua EOF nếu bài hát vừa bắt đầu < 5 giây (false EOF khi ESP32 mất kết nối tạm thời)
+            if cur_elapsed < 5:
+                print(f"[PlayerHub] Bỏ qua EOF giả (elapsed={cur_elapsed}s < 5s)")
+            else:
+                # Cooldown 4 giây giữa 2 lần auto-next liên tiếp
+                last_next = _player_state.get("_last_auto_next_ts", 0)
+                now_ts = _time.time()
+                if now_ts - last_next < 4:
+                    print(f"[PlayerHub] Bỏ qua EOF (cooldown còn {4-(now_ts-last_next):.1f}s)")
+                else:
+                    _player_state["_last_auto_next_ts"] = now_ts
+                    print(f"[PlayerHub] Song finished (EOF, elapsed={cur_elapsed}s) -> Auto-Next...")
+                    if not _auto_play_next():
+                        _player_state["state"] = "next_requested"
+
+        elif event == "error":
+            print(f"[PlayerHub] Loa bao loi stream -> Giu nguyen bai hien tai")
 
     return jsonify({"status": "ok"})
 
