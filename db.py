@@ -3,13 +3,25 @@ Database module for ESP32 Music Player Server.
 Sử dụng SQLite3 để lưu trữ:
 - Danh sách bài hát yêu thích (favorites)
 - Lịch sử tìm kiếm gần đây (search_history)
+- Gợi ý từ khóa trực tuyến qua YouTube/Google Suggest
 """
 
 import sqlite3
 import os
+import json
+import urllib.request
+import urllib.parse
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "music.db"
+
+DEFAULT_HOT_SEARCHES = [
+    "Son Tung M-TP",
+    "Remix TikTok",
+    "Chill Lofi",
+    "Nhac Tre Gay Nghien",
+    "Rap Viet",
+]
 
 
 def get_db():
@@ -62,7 +74,6 @@ def add_search_history(query: str, platform: str = "youtube"):
                     created_at = CURRENT_TIMESTAMP,
                     platform = excluded.platform
             """, (q, platform))
-            # Xóa các mục cũ nếu vượt quá 30
             conn.execute("""
                 DELETE FROM search_history WHERE id NOT IN (
                     SELECT id FROM search_history ORDER BY created_at DESC LIMIT 30
@@ -73,30 +84,43 @@ def add_search_history(query: str, platform: str = "youtube"):
 
 
 def get_recent_searches(limit: int = 5) -> list[str]:
-    """Lấy N từ khóa tìm kiếm gần đây nhất."""
+    """Lấy N từ khóa tìm kiếm gần đây nhất, nếu chưa đủ thì bù bằng Hot Searches."""
     conn = get_db()
+    results = []
     try:
         cursor = conn.execute("""
             SELECT query FROM search_history
             ORDER BY created_at DESC
             LIMIT ?
         """, (limit,))
-        return [row["query"] for row in cursor.fetchall()]
+        results = [row["query"] for row in cursor.fetchall()]
     finally:
         conn.close()
+
+    # Nếu chưa đủ limit (lần đầu dùng), bù thêm các từ khóa hot
+    for hot in DEFAULT_HOT_SEARCHES:
+        if len(results) >= limit:
+            break
+        if hot not in results:
+            results.append(hot)
+
+    return results[:limit]
 
 
 def get_suggestions(prefix: str, limit: int = 5) -> list[str]:
     """
     Gợi ý từ khóa:
-    1. Tìm trong lịch sử tìm kiếm khớp tiền tố
-    2. Nếu không đủ, tìm trong danh sách bài hát yêu thích khớp tiền tố
+    1. Tìm trong lịch sử tìm kiếm & yêu thích khớp tiền tố
+    2. Gọi Google/YouTube Suggestion API để lấy gợi ý trực tuyến thực tế
     """
-    p = prefix.strip().lower()
+    p = prefix.strip()
     if not p:
         return get_recent_searches(limit)
 
     results = []
+    p_lower = p.lower()
+
+    # 1. Tìm trong SQLite trước
     conn = get_db()
     try:
         cursor = conn.execute("""
@@ -104,7 +128,7 @@ def get_suggestions(prefix: str, limit: int = 5) -> list[str]:
             WHERE LOWER(query) LIKE ?
             ORDER BY created_at DESC
             LIMIT ?
-        """, (f"{p}%", limit))
+        """, (f"{p_lower}%", limit))
         for row in cursor.fetchall():
             if row["query"] not in results:
                 results.append(row["query"])
@@ -115,14 +139,30 @@ def get_suggestions(prefix: str, limit: int = 5) -> list[str]:
                 WHERE LOWER(title) LIKE ?
                 ORDER BY created_at DESC
                 LIMIT ?
-            """, (f"%{p}%", limit - len(results)))
+            """, (f"%{p_lower}%", limit - len(results)))
             for row in cursor.fetchall():
                 if row["title"] not in results:
                     results.append(row["title"])
-
-        return results[:limit]
     finally:
         conn.close()
+
+    # 2. Nếu chưa đủ limit -> Gọi Google/YouTube Suggest API để lấy gợi ý âm nhạc thực tế
+    if len(results) < limit:
+        try:
+            url = f"https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={urllib.parse.quote(p)}"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=2.5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+                if len(data) > 1 and isinstance(data[1], list):
+                    for item in data[1]:
+                        if len(results) >= limit:
+                            break
+                        if item not in results:
+                            results.append(item)
+        except Exception as ex:
+            print(f"[Suggest] Online suggest error: {ex}")
+
+    return results[:limit]
 
 
 # ─── Favorites ───────────────────────────────────────────────
