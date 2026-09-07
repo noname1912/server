@@ -24,6 +24,17 @@ DEFAULT_HOT_SEARCHES = [
 ]
 
 
+def to_ascii_simple(s: str) -> str:
+    """Chuyển tiếng Việt có dấu thành không dấu để hiển thị chuẩn trên màn hình TFT ESP32."""
+    import unicodedata
+    if not s:
+        return ""
+    norm = unicodedata.normalize('NFD', str(s))
+    clean = ''.join(c for c in norm if unicodedata.category(c) != 'Mn')
+    clean = clean.replace('đ', 'd').replace('Đ', 'D')
+    return ''.join(c for c in clean if ord(c) < 128).strip()
+
+
 def get_db():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -137,7 +148,17 @@ def get_recent_searches(limit: int = 5, platform: str = None) -> list[str]:
         if hot not in results:
             results.append(hot)
 
-    return results[:limit]
+    cleaned = []
+    seen = set()
+    for r in results:
+        asc = to_ascii_simple(r)
+        if asc and asc.lower() not in seen:
+            seen.add(asc.lower())
+            cleaned.append(asc)
+            if len(cleaned) >= limit:
+                break
+
+    return cleaned
 
 
 def get_suggestions(prefix: str, limit: int = 5, platform: str = "youtube") -> list[str]:
@@ -225,6 +246,8 @@ def get_suggestions(prefix: str, limit: int = 5, platform: str = "youtube") -> l
         except Exception as ex:
             print(f"[Suggest] Online suggest error: {ex}")
 
+
+
     # 4. Fallback danh sách hot keywords nếu vẫn chưa có gì
     if len(results) < limit:
         for hot in HOT_SEARCHES_BY_PLATFORM.get(plat, DEFAULT_HOT_SEARCHES):
@@ -233,7 +256,18 @@ def get_suggestions(prefix: str, limit: int = 5, platform: str = "youtube") -> l
                 if len(results) >= limit:
                     break
 
-    return results[:limit]
+    # Chuẩn hóa về không dấu sạch cho màn hình TFT ESP32, loại bỏ trùng lặp
+    cleaned_results = []
+    seen = set()
+    for r in results:
+        asc = to_ascii_simple(r)
+        if asc and asc.lower() not in seen:
+            seen.add(asc.lower())
+            cleaned_results.append(asc)
+            if len(cleaned_results) >= limit:
+                break
+
+    return cleaned_results
 
 
 # ─── Favorites ───────────────────────────────────────────────
