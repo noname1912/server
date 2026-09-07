@@ -1,4 +1,4 @@
-﻿"""
+"""
 Database module for ESP32 Music Player Server.
 Sử dụng SQLite3 để lưu trữ:
 - Danh sách bài hát yêu thích (favorites)
@@ -83,22 +83,55 @@ def add_search_history(query: str, platform: str = "youtube"):
         conn.close()
 
 
-def get_recent_searches(limit: int = 5) -> list[str]:
-    """Lấy N từ khóa tìm kiếm gần đây nhất, nếu chưa đủ thì bù bằng Hot Searches."""
+HOT_SEARCHES_BY_PLATFORM = {
+    "zing": [
+        "Sơn Tùng M-TP",
+        "Nơi Này Có Anh",
+        "Sóng Gió",
+        "Một Bước Yêu Vạn Dặm Đau",
+        "Remix TikTok",
+    ],
+    "soundcloud": [
+        "Vinahouse Bass Cực Căng",
+        "Nonstop Việt Mix",
+        "Remix TikTok",
+        "Chill EDM",
+        "Lofi Beat",
+    ],
+    "youtube": [
+        "Son Tung M-TP",
+        "Remix TikTok",
+        "Chill Lofi",
+        "Nhac Tre Gay Nghien",
+        "Rap Viet",
+    ]
+}
+
+
+def get_recent_searches(limit: int = 5, platform: str = None) -> list[str]:
+    """Lấy N từ khóa tìm kiếm gần đây nhất theo nền tảng, nếu chưa đủ thì bù bằng Hot Searches."""
     conn = get_db()
     results = []
     try:
-        cursor = conn.execute("""
-            SELECT query FROM search_history
-            ORDER BY created_at DESC
-            LIMIT ?
-        """, (limit,))
+        if platform:
+            cursor = conn.execute("""
+                SELECT query FROM search_history
+                WHERE platform = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (platform.lower(), limit))
+        else:
+            cursor = conn.execute("""
+                SELECT query FROM search_history
+                ORDER BY created_at DESC
+                LIMIT ?
+            """, (limit,))
         results = [row["query"] for row in cursor.fetchall()]
     finally:
         conn.close()
 
-    # Nếu chưa đủ limit (lần đầu dùng), bù thêm các từ khóa hot
-    for hot in DEFAULT_HOT_SEARCHES:
+    hot_list = HOT_SEARCHES_BY_PLATFORM.get((platform or "").lower(), DEFAULT_HOT_SEARCHES)
+    for hot in hot_list:
         if len(results) >= limit:
             break
         if hot not in results:
@@ -107,20 +140,22 @@ def get_recent_searches(limit: int = 5) -> list[str]:
     return results[:limit]
 
 
-def get_suggestions(prefix: str, limit: int = 5) -> list[str]:
+def get_suggestions(prefix: str, limit: int = 5, platform: str = "youtube") -> list[str]:
     """
-    Gợi ý từ khóa:
+    Gợi ý từ khóa theo từng nền tảng:
     1. Tìm trong lịch sử tìm kiếm & yêu thích khớp tiền tố
-    2. Gọi Google/YouTube Suggestion API để lấy gợi ý trực tuyến thực tế
+    2. Gọi ZingMP3 Complete API nếu là zing
+    3. Gọi Google/YouTube VN Suggestion API
     """
     p = prefix.strip()
+    plat = (platform or "youtube").lower()
     if not p:
-        return get_recent_searches(limit)
+        return get_recent_searches(limit, platform=plat)
 
     results = []
     p_lower = p.lower()
 
-    # 1. Tìm trong SQLite trước
+    # 1. Tìm trong SQLite trước (lịch sử tìm kiếm & bài hát yêu thích)
     conn = get_db()
     try:
         cursor = conn.execute("""
@@ -146,12 +181,40 @@ def get_suggestions(prefix: str, limit: int = 5) -> list[str]:
     finally:
         conn.close()
 
-    # 2. Nếu chưa đủ limit -> Gọi Google/YouTube Suggest API để lấy gợi ý âm nhạc thực tế
+    # 2. Nếu là ZingMP3 -> Gọi Zing Complete API trực tiếp
+    if plat == "zing" and len(results) < limit:
+        try:
+            zing_url = f"http://ac.mp3.zing.vn/complete?type=artist,song,key,album&num=8&query={urllib.parse.quote(p)}"
+            req = urllib.request.Request(zing_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=2.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                for group in data.get("data", []):
+                    for song in group.get("song", []):
+                        sname = song.get("name", "").strip()
+                        if sname and sname not in results:
+                            results.append(sname)
+                            if len(results) >= limit:
+                                break
+                    if len(results) >= limit:
+                        break
+                    for artist in group.get("artist", []):
+                        aname = artist.get("name", "").strip()
+                        if aname and aname not in results:
+                            results.append(aname)
+                            if len(results) >= limit:
+                                break
+                    if len(results) >= limit:
+                        break
+        except Exception as ze:
+            print(f"[Suggest] Zing suggest error: {ze}")
+
+    # 3. Nếu chưa đủ limit -> Gọi Google Suggest với ngôn ngữ tiếng Việt (hl=vi, gl=vn)
     if len(results) < limit:
         try:
-            url = f"https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={urllib.parse.quote(p)}"
+            ds_param = "yt" if plat != "soundcloud" else "yt"
+            url = f"https://suggestqueries.google.com/complete/search?client=firefox&ds={ds_param}&hl=vi&gl=vn&q={urllib.parse.quote(p)}"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=2.5) as response:
+            with urllib.request.urlopen(req, timeout=2.0) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 if len(data) > 1 and isinstance(data[1], list):
                     for item in data[1]:
@@ -161,6 +224,14 @@ def get_suggestions(prefix: str, limit: int = 5) -> list[str]:
                             results.append(item)
         except Exception as ex:
             print(f"[Suggest] Online suggest error: {ex}")
+
+    # 4. Fallback danh sách hot keywords nếu vẫn chưa có gì
+    if len(results) < limit:
+        for hot in HOT_SEARCHES_BY_PLATFORM.get(plat, DEFAULT_HOT_SEARCHES):
+            if p_lower in hot.lower() and hot not in results:
+                results.append(hot)
+                if len(results) >= limit:
+                    break
 
     return results[:limit]
 

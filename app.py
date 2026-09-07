@@ -98,19 +98,21 @@ def search_history():
         return jsonify({"status": "ok"})
     else:
         limit = int(request.args.get("limit", 5))
-        history = db.get_recent_searches(limit=limit)
+        platform = request.args.get("platform", "").strip().lower()
+        history = db.get_recent_searches(limit=limit, platform=platform or None)
         return jsonify(history)
 
 
 @app.route("/api/suggest", methods=["GET"])
 def search_suggest():
     """
-    GET /api/suggest?q=<prefix>&limit=5
-    Trả về danh sách gợi ý phù hợp với từ khóa đang gõ
+    GET /api/suggest?q=<prefix>&limit=5&platform=zing|soundcloud|youtube
+    Trả về danh sách gợi ý phù hợp với từ khóa đang gõ theo từng nền tảng
     """
     prefix = request.args.get("q", "").strip()
+    platform = request.args.get("platform", "youtube").strip().lower()
     limit = int(request.args.get("limit", 5))
-    suggestions = db.get_suggestions(prefix, limit=limit)
+    suggestions = db.get_suggestions(prefix, limit=limit, platform=platform)
     return jsonify(suggestions)
 
 
