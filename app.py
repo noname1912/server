@@ -19,9 +19,11 @@ from flask_cors import CORS
 from PIL import Image
 
 from platforms import PLATFORMS
+import db
 
 app = Flask(__name__)
 CORS(app)
+db.init_db()
 
 # ─── Cache đơn giản cho stream URLs (tránh gọi API nhiều lần) ──
 _stream_cache: dict[str, str] = {}
@@ -60,6 +62,12 @@ def search():
         return jsonify({"error": f"Unknown platform '{platform}'"}), 400
 
     print(f"[Search] q={q!r} platform={platform} limit={limit}")
+    # Lưu từ khóa vào lịch sử tìm kiếm SQLite
+    try:
+        db.add_search_history(q, platform)
+    except Exception as dbe:
+        print(f"[Search] DB history error: {dbe}")
+
     try:
         results = PLATFORMS[platform].search(q, limit=limit)
         # Lưu kết quả tìm kiếm vào danh sách phát (Playlist) để tự động Next bài
@@ -71,6 +79,81 @@ def search():
     except Exception as e:
         print(f"[Search] Error: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+# ─── Lịch sử tìm kiếm & Gợi ý (Search History & Suggestions) ──
+
+@app.route("/api/history", methods=["GET", "POST"])
+def search_history():
+    """
+    GET  /api/history?limit=5  -> Trả về danh sách [str] các tìm kiếm gần nhất
+    POST /api/history          -> Thêm từ khóa {"q": "..."}
+    """
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True) or {}
+        q = str(data.get("q", "")).strip()
+        p = str(data.get("platform", "youtube")).lower()
+        if q:
+            db.add_search_history(q, p)
+        return jsonify({"status": "ok"})
+    else:
+        limit = int(request.args.get("limit", 5))
+        history = db.get_recent_searches(limit=limit)
+        return jsonify(history)
+
+
+@app.route("/api/suggest", methods=["GET"])
+def search_suggest():
+    """
+    GET /api/suggest?q=<prefix>&limit=5
+    Trả về danh sách gợi ý phù hợp với từ khóa đang gõ
+    """
+    prefix = request.args.get("q", "").strip()
+    limit = int(request.args.get("limit", 5))
+    suggestions = db.get_suggestions(prefix, limit=limit)
+    return jsonify(suggestions)
+
+
+# ─── Bài hát yêu thích (Favorites — SQLite3) ──────────────────
+
+@app.route("/api/favorites", methods=["GET"])
+def get_favorites():
+    """
+    GET /api/favorites
+    Trả về danh sách các bài hát yêu thích đã lưu trong CSDL SQLite
+    """
+    favs = db.get_favorites()
+    return jsonify(favs)
+
+
+@app.route("/api/favorites/ids", methods=["GET"])
+def get_favorite_ids():
+    """
+    GET /api/favorites/ids
+    Trả về mảng ID các bài hát yêu thích để ESP32 hiển thị tim đỏ nhanh chóng
+    """
+    ids = db.get_favorite_ids()
+    return jsonify(ids)
+
+
+@app.route("/api/favorites/toggle", methods=["POST"])
+def toggle_favorite():
+    """
+    POST /api/favorites/toggle
+    Body JSON: {"id": "...", "platform": "...", "title": "...", "artist": "...", "duration": 180, "thumbnail": "..."}
+    Thêm/Xóa bài hát khỏi danh sách yêu thích
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    song_id = str(data.get("id", "")).strip()
+    if not song_id:
+        return jsonify({"error": "Missing song id"}), 400
+
+    is_fav = db.toggle_favorite(data)
+    return jsonify({
+        "status": "ok",
+        "id": song_id,
+        "is_favorite": is_fav
+    })
 
 
 # ─── Trending / Home ────────────────────────────────────────────
@@ -151,7 +234,7 @@ def stream_audio(platform: str, song_id: str):
         def generate_ffmpeg():
             try:
                 while True:
-                    chunk = proc.stdout.read(4096)
+                    chunk = proc.stdout.read(16384)
                     if not chunk:
                         break
                     yield chunk
@@ -194,7 +277,7 @@ def stream_audio(platform: str, song_id: str):
         def generate():
             try:
                 while True:
-                    chunk = remote.read(8192)
+                    chunk = remote.read(16384)
                     if not chunk:
                         break
                     yield chunk
