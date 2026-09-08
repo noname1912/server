@@ -51,17 +51,19 @@ def search():
         q        = str(data.get("q", "")).strip()
         platform = str(data.get("platform", "zing")).lower()
         limit    = int(data.get("limit", 20))
+        stype    = str(data.get("type", "song")).lower()
     else:
         q        = request.args.get("q", "").strip()
         platform = request.args.get("platform", "zing").lower()
         limit    = int(request.args.get("limit", 20))
+        stype    = str(request.args.get("type", "song")).lower()
 
     if not q:
         return jsonify({"error": "Missing query parameter 'q'"}), 400
     if platform not in PLATFORMS:
         return jsonify({"error": f"Unknown platform '{platform}'"}), 400
 
-    print(f"[Search] q={q!r} platform={platform} limit={limit}")
+    print(f"[Search] q={q!r} platform={platform} type={stype} limit={limit}")
     # Lưu từ khóa vào lịch sử tìm kiếm SQLite
     try:
         db.add_search_history(q, platform)
@@ -69,7 +71,12 @@ def search():
         print(f"[Search] DB history error: {dbe}")
 
     try:
-        results = PLATFORMS[platform].search(q, limit=limit)
+        plat_obj = PLATFORMS[platform]
+        if stype == "playlist" and hasattr(plat_obj, "search_playlists"):
+            results = plat_obj.search_playlists(q, limit=limit)
+            return jsonify(results)
+
+        results = plat_obj.search(q, limit=limit)
         # Lưu kết quả tìm kiếm vào danh sách phát (Playlist) để tự động Next bài
         global _playlist, _playlist_idx
         with _player_lock:
@@ -78,6 +85,43 @@ def search():
         return jsonify(results)
     except Exception as e:
         print(f"[Search] Error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+# ─── Lấy danh sách bài hát trong Playlist ──────────────────────
+
+@app.route("/api/playlist/tracks", methods=["GET"])
+def playlist_tracks():
+    """
+    GET /api/playlist/tracks?id=<playlist_id>&platform=<youtube|zing|soundcloud>&limit=30
+    Lấy danh sách các bài hát trong Playlist và tự động nạp vào playlist phát của server.
+    """
+    playlist_id = request.args.get("id", "").strip()
+    platform    = request.args.get("platform", "youtube").lower()
+    limit       = int(request.args.get("limit", 30))
+
+    if not playlist_id:
+        return jsonify({"error": "Missing 'id'"}), 400
+    if platform not in PLATFORMS:
+        return jsonify({"error": f"Unknown platform '{platform}'"}), 400
+
+    try:
+        plat_obj = PLATFORMS[platform]
+        if hasattr(plat_obj, "get_playlist_tracks"):
+            tracks = plat_obj.get_playlist_tracks(playlist_id, limit=limit)
+        else:
+            tracks = []
+
+        # Tự động nạp vào hàng đợi phát (Playlist) để tự động Next bài
+        global _playlist, _playlist_idx
+        with _player_lock:
+            if tracks:
+                _playlist = list(tracks)
+                _playlist_idx = 0
+
+        return jsonify(tracks)
+    except Exception as e:
+        print(f"[PlaylistTracks] Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 

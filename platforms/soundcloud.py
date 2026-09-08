@@ -59,6 +59,47 @@ class SoundCloudPlatform:
             print(f"[SoundCloud] Search error: {ex}")
         return results[:limit]
 
+    # ── Search Playlists ─────────────────────────────────────
+    def search_playlists(self, query: str, limit: int = 10) -> list[dict]:
+        """Tìm kiếm Sets / Mix / Playlist trên SoundCloud."""
+        search_url = f"scsearch{limit}:{query} non stop viet mix"
+        results = []
+        try:
+            with yt_dlp.YoutubeDL(_YDL_SEARCH_OPTS) as ydl:
+                info = ydl.extract_info(search_url, download=False)
+                entries = info.get("entries", []) if info else []
+                for e in entries:
+                    if not e:
+                        continue
+                    track_id = _extract_sc_id(e)
+                    if not track_id:
+                        continue
+                    results.append({
+                        "id":        track_id,
+                        "title":     e.get("title", "Nonstop Mix"),
+                        "artist":    e.get("uploader") or "SoundCloud",
+                        "duration":  int(e.get("duration") or 0),
+                        "platform":  "soundcloud",
+                        "thumbnail": _first_thumb(e.get("thumbnails", [])),
+                        "type":      "playlist"
+                    })
+        except Exception as ex:
+            print(f"[SoundCloud] Search playlists error: {ex}")
+        return results[:limit]
+
+    # ── Get Playlist Tracks ──────────────────────────────────
+    def get_playlist_tracks(self, playlist_id: str, limit: int = 30) -> list[dict]:
+        """Lấy bài hát trong playlist (hoặc phát mix đó)."""
+        # Với SoundCloud mix, trả về chính track đó
+        return [{
+            "id": playlist_id,
+            "title": "SoundCloud Mix Set",
+            "artist": "SoundCloud",
+            "duration": 1800,
+            "platform": "soundcloud",
+            "thumbnail": ""
+        }]
+
     # ── Stream URL ────────────────────────────────────────────
     def get_stream_url(self, song_id: str) -> str | None:
         """
