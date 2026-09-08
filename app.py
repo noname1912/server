@@ -4,6 +4,7 @@ Hỗ trợ: ZingMP3 | SoundCloud | YouTube
 """
 
 import os
+import time
 import json
 import struct
 import threading
@@ -462,7 +463,7 @@ _playlist: list[dict] = []
 _playlist_idx: int = 0
 _player_state = {
     "state": "stopped",      # "playing", "paused", "stopped"
-    "seq": 0,                # Tăng mỗi khi bài đổi để ESP32 loa nhận diện bài mới
+    "seq": int(time.time()), # Dùng timestamp để luôn tăng và không bao giờ bị trùng
     "song": None,            # Thông tin SongInfo hiện tại
     "stream_url": "",        # URL stream cho ESP32 loa
     "volume": 15,            # 0–21
@@ -480,7 +481,7 @@ def _auto_play_next() -> bool:
     song_id  = str(next_song.get("id", "")).strip()
     if not song_id:
         return False
-    _player_state["seq"] += 1
+    _player_state["seq"] = int(time.time() * 1000) % 2000000000
     _player_state["state"] = "playing"
     _player_state["stream_url"] = f"/api/stream/{platform}/{song_id}"
     _player_state["song"] = next_song
@@ -524,7 +525,7 @@ def player_play():
             })
             _playlist_idx = len(_playlist) - 1
 
-        _player_state["seq"] += 1
+        _player_state["seq"] = int(time.time() * 1000) % 2000000000
         _player_state["state"] = "playing"
         _player_state["stream_url"] = stream_url
         _player_state["song"] = {
@@ -555,6 +556,7 @@ def player_control():
         if action == "pause":
             _player_state["state"] = "paused"
         elif action == "resume":
+            _player_state["seq"] = int(time.time() * 1000) % 2000000000
             _player_state["state"] = "playing"
         elif action == "stop":
             _player_state["state"] = "stopped"
