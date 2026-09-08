@@ -4,6 +4,9 @@ SoundCloud Platform — via yt-dlp
 
 import re
 import time
+import json
+import urllib.request
+import urllib.parse
 import yt_dlp
 
 _YDL_SEARCH_OPTS = {
@@ -22,6 +25,33 @@ _YDL_STREAM_OPTS = {
     "retries":       3,
     "sleep_interval": 1,
 }
+
+_sc_client_id = "Pb72ranhoyt6gw7hM7TkzUItXlMWSNSo"
+_sc_client_id_exp = 0
+
+def _get_sc_client_id() -> str:
+    global _sc_client_id, _sc_client_id_exp
+    if _sc_client_id and time.time() < _sc_client_id_exp:
+        return _sc_client_id
+    try:
+        req = urllib.request.Request("https://soundcloud.com", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+        scripts = re.findall(r'src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', html)
+        for s in scripts[-6:]:
+            try:
+                with urllib.request.urlopen(s, timeout=5) as js_resp:
+                    js = js_resp.read().decode("utf-8", errors="ignore")
+                m = re.search(r'client_id:"([a-zA-Z0-9]{32})"', js)
+                if m:
+                    _sc_client_id = m.group(1)
+                    _sc_client_id_exp = time.time() + 86400
+                    return _sc_client_id
+            except Exception:
+                pass
+    except Exception as ex:
+        print(f"[SoundCloud] get client_id error: {ex}")
+    return _sc_client_id or "Pb72ranhoyt6gw7hM7TkzUItXlMWSNSo"
 
 
 class SoundCloudPlatform:
@@ -61,44 +91,83 @@ class SoundCloudPlatform:
 
     # ── Search Playlists ─────────────────────────────────────
     def search_playlists(self, query: str, limit: int = 10) -> list[dict]:
-        """Tìm kiếm Sets / Mix / Playlist trên SoundCloud."""
-        search_url = f"scsearch{limit}:{query} non stop viet mix"
+        """Tìm kiếm Playlist thực sự trên SoundCloud bằng API v2."""
+        cid = _get_sc_client_id()
+        url = f"https://api-v2.soundcloud.com/search/playlists_without_albums?q={urllib.parse.quote(query)}&client_id={cid}&limit={limit}"
         results = []
         try:
-            with yt_dlp.YoutubeDL(_YDL_SEARCH_OPTS) as ydl:
-                info = ydl.extract_info(search_url, download=False)
-                entries = info.get("entries", []) if info else []
-                for e in entries:
-                    if not e:
-                        continue
-                    track_id = _extract_sc_id(e)
-                    if not track_id:
-                        continue
-                    results.append({
-                        "id":        track_id,
-                        "title":     e.get("title", "Nonstop Mix"),
-                        "artist":    e.get("uploader") or "SoundCloud",
-                        "duration":  int(e.get("duration") or 0),
-                        "platform":  "soundcloud",
-                        "thumbnail": _first_thumb(e.get("thumbnails", [])),
-                        "type":      "playlist"
-                    })
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as res:
+                data = json.loads(res.read().decode("utf-8"))
+            for p in data.get("collection", []):
+                if not p:
+                    continue
+                pid = str(p.get("id", ""))
+                if not pid:
+                    continue
+                title = p.get("title", "SoundCloud Playlist")
+                user = p.get("user") or {}
+                artist = user.get("username") or "SoundCloud"
+                artwork = p.get("artwork_url") or ""
+                if not artwork and p.get("tracks"):
+                    artwork = p["tracks"][0].get("artwork_url") or ""
+                if not artwork:
+                    artwork = user.get("avatar_url") or ""
+                if artwork and "-large" in artwork:
+                    artwork = artwork.replace("-large", "-t300x300")
+
+                results.append({
+                    "id": pid,
+                    "title": title,
+                    "artist": artist,
+                    "duration": 0,
+                    "platform": "soundcloud",
+                    "thumbnail": artwork,
+                    "type": "playlist",
+                    "track_count": p.get("track_count", len(p.get("tracks", [])))
+                })
         except Exception as ex:
             print(f"[SoundCloud] Search playlists error: {ex}")
         return results[:limit]
 
     # ── Get Playlist Tracks ──────────────────────────────────
     def get_playlist_tracks(self, playlist_id: str, limit: int = 30) -> list[dict]:
-        """Lấy bài hát trong playlist (hoặc phát mix đó)."""
-        # Với SoundCloud mix, trả về chính track đó
-        return [{
-            "id": playlist_id,
-            "title": "SoundCloud Mix Set",
-            "artist": "SoundCloud",
-            "duration": 1800,
-            "platform": "soundcloud",
-            "thumbnail": ""
-        }]
+        """Lấy danh sách các bài hát trong Playlist SoundCloud."""
+        cid = _get_sc_client_id()
+        url = f"https://api-v2.soundcloud.com/playlists/{playlist_id}?client_id={cid}"
+        results = []
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=8) as res:
+                data = json.loads(res.read().decode("utf-8"))
+            tracks = data.get("tracks", [])
+            for t in tracks:
+                if not t or not isinstance(t, dict):
+                    continue
+                tid = str(t.get("id", ""))
+                if not tid:
+                    continue
+                title = t.get("title", "Unknown")
+                user = t.get("user") or {}
+                artist = user.get("username") or "SoundCloud"
+                dur_ms = t.get("duration") or 0
+                dur_sec = int(dur_ms // 1000)
+                artwork = t.get("artwork_url") or user.get("avatar_url") or ""
+                if artwork and "-large" in artwork:
+                    artwork = artwork.replace("-large", "-t300x300")
+                results.append({
+                    "id": tid,
+                    "title": title,
+                    "artist": artist,
+                    "duration": dur_sec,
+                    "platform": "soundcloud",
+                    "thumbnail": artwork
+                })
+                if len(results) >= limit:
+                    break
+        except Exception as ex:
+            print(f"[SoundCloud] Get tracks error: {ex}")
+        return results
 
     # ── Stream URL ────────────────────────────────────────────
     def get_stream_url(self, song_id: str) -> str | None:

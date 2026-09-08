@@ -74,6 +74,9 @@ def search():
         plat_obj = PLATFORMS[platform]
         if stype == "playlist" and hasattr(plat_obj, "search_playlists"):
             results = plat_obj.search_playlists(q, limit=limit)
+            for r in results:
+                r["title"] = db.to_ascii_simple(r.get("title", ""))
+                r["artist"] = db.to_ascii_simple(r.get("artist", ""))
             return jsonify(results)
 
         results = plat_obj.search(q, limit=limit)
@@ -109,6 +112,9 @@ def playlist_tracks():
         plat_obj = PLATFORMS[platform]
         if hasattr(plat_obj, "get_playlist_tracks"):
             tracks = plat_obj.get_playlist_tracks(playlist_id, limit=limit)
+            for t in tracks:
+                t["title"] = db.to_ascii_simple(t.get("title", ""))
+                t["artist"] = db.to_ascii_simple(t.get("artist", ""))
         else:
             tracks = []
 

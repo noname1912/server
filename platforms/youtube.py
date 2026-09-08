@@ -73,6 +73,8 @@ class YouTubePlatform:
                     if not pid or not pid.startswith("PL"):
                         continue
                     thumb = e.get("thumbnail") or ""
+                    if not thumb and e.get("thumbnails"):
+                        thumb = e.get("thumbnails")[-1].get("url", "")
                     if not str(thumb).startswith("http"):
                         thumb = ""
                     results.append({
