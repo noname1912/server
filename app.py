@@ -483,7 +483,12 @@ def _auto_play_next() -> bool:
         return False
     _player_state["seq"] = int(time.time() * 1000) % 2000000000
     _player_state["state"] = "playing"
-    _player_state["stream_url"] = f"/api/stream/{platform}/{song_id}"
+    if song_id.startswith("http"):
+        import base64
+        safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
+    else:
+        safe_id = song_id
+    _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}"
     _player_state["song"] = next_song
     _player_state["elapsed"] = 0
     print(f"[PlayerHub-AutoNext] Auto-play #{_player_state['seq']}: {next_song.get('title')} ({platform})")
@@ -504,8 +509,13 @@ def player_play():
     if not song_id:
         return jsonify({"error": "Missing song_id"}), 400
 
-    # Lấy stream url
-    stream_url = f"/api/stream/{platform}/{song_id}"
+    # Lấy stream url an toàn cho ESP32 Audio parser (tránh chứa http:// trong path)
+    if song_id.startswith("http"):
+        import base64
+        safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
+    else:
+        safe_id = song_id
+    stream_url = f"/api/stream/{platform}/{safe_id}"
 
     with _player_lock:
         # Cập nhật vị trí bài trong playlist nếu có
@@ -646,6 +656,16 @@ def player_report():
 @app.route("/api/ping")
 def ping():
     return jsonify({"status": "ok", "version": "2.0"})
+
+
+@app.route("/api/debug/log")
+def debug_log():
+    try:
+        with open("server.log", "r", encoding="utf-8", errors="ignore") as f:
+            lines = f.readlines()
+        return Response("".join(lines[-100:]), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return str(e), 500
 
 
 # ─── Entry Point ───────────────────────────────────────────────

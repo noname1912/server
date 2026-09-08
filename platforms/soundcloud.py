@@ -176,8 +176,13 @@ class SoundCloudPlatform:
                  hoặc full URL (e.g. 'https://soundcloud.com/...')
         Trả về URL stream trực tiếp.
         """
-        # Xây dựng URL từ numeric ID
-        if song_id.isdigit():
+        # Xây dựng URL từ numeric ID hoặc b64_ ID
+        if song_id.startswith("b64_"):
+            import base64
+            pad = len(song_id[4:]) % 4
+            b64 = song_id[4:] + ("=" * (4 - pad) if pad else "")
+            url = base64.urlsafe_b64decode(b64).decode(errors="ignore")
+        elif song_id.isdigit():
             url = f"https://api.soundcloud.com/tracks/{song_id}"
         elif song_id.startswith("http"):
             url = song_id
@@ -245,10 +250,21 @@ def _extract_sc_id(entry: dict) -> str:
         if m:
             return m.group(1)
 
-    # Fallback: dùng nguyên URL nếu là soundcloud.com
+    # Fallback: giải quyết URL thành numeric ID sạch
     url = entry.get("webpage_url") or entry.get("url", "")
     if "soundcloud.com" in url:
-        return url  # server sẽ dùng trực tiếp
+        cid = _get_sc_client_id()
+        try:
+            r_url = f"https://api-v2.soundcloud.com/resolve?url={urllib.parse.quote(url)}&client_id={cid}"
+            req = urllib.request.Request(r_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if data and data.get("id"):
+                return str(data["id"])
+        except Exception:
+            pass
+        import base64
+        return "b64_" + base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
 
     return ""
 
