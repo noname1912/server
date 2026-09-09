@@ -140,13 +140,34 @@ class SoundCloudPlatform:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=8) as res:
                 data = json.loads(res.read().decode("utf-8"))
-            tracks = data.get("tracks", [])
+            tracks = data.get("tracks", [])[:limit]
+
+            # Bổ sung thông tin cho các bài hát từ vị trí thứ 5 trở đi (SoundCloud API v2 chỉ trả về stub ID)
+            stub_ids = [str(t.get("id")) for t in tracks if isinstance(t, dict) and "title" not in t and t.get("id")]
+            hydrated_map = {}
+            if stub_ids:
+                try:
+                    ids_param = ",".join(stub_ids)
+                    tracks_url = f"https://api-v2.soundcloud.com/tracks?ids={ids_param}&client_id={cid}"
+                    t_req = urllib.request.Request(tracks_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(t_req, timeout=6) as t_res:
+                        hydrated_list = json.loads(t_res.read().decode("utf-8"))
+                        for ht in hydrated_list:
+                            if isinstance(ht, dict) and ht.get("id"):
+                                hydrated_map[str(ht["id"])] = ht
+                except Exception as ex_h:
+                    print(f"[SoundCloud] Hydrate tracks error: {ex_h}")
+
             for t in tracks:
                 if not t or not isinstance(t, dict):
                     continue
                 tid = str(t.get("id", ""))
                 if not tid:
                     continue
+                # Nếu bài hát là stub, thay thế bằng dữ liệu đã nạp
+                if "title" not in t and tid in hydrated_map:
+                    t = hydrated_map[tid]
+
                 title = t.get("title", "Unknown")
                 user = t.get("user") or {}
                 artist = user.get("username") or "SoundCloud"

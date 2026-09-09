@@ -488,7 +488,13 @@ def _auto_play_next() -> bool:
         safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
     else:
         safe_id = song_id
-    _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}"
+
+    # Xóa cache của bài tiếp theo để luôn lấy stream URL tươi mới
+    with _cache_lock:
+        _stream_cache.pop(f"{platform}:{song_id}", None)
+        _stream_cache.pop(f"{platform}:{safe_id}", None)
+
+    _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
     _player_state["song"] = next_song
     _player_state["elapsed"] = 0
     print(f"[PlayerHub-AutoNext] Auto-play #{_player_state['seq']}: {next_song.get('title')} ({platform})")
@@ -515,7 +521,11 @@ def player_play():
         safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
     else:
         safe_id = song_id
-    stream_url = f"/api/stream/{platform}/{safe_id}"
+
+    # Xóa cache cũ của bài hát này để ép buộc lấy link stream mới 100% (tránh lỗi 403 link hết hạn khi nghe lại bài cũ)
+    with _cache_lock:
+        _stream_cache.pop(f"{platform}:{song_id}", None)
+        _stream_cache.pop(f"{platform}:{safe_id}", None)
 
     with _player_lock:
         # Cập nhật vị trí bài trong playlist nếu có
@@ -537,7 +547,7 @@ def player_play():
 
         _player_state["seq"] = int(time.time() * 1000) % 2000000000
         _player_state["state"] = "playing"
-        _player_state["stream_url"] = stream_url
+        _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
         _player_state["song"] = {
             "id": song_id,
             "platform": platform,
