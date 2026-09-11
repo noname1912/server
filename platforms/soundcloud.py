@@ -146,17 +146,20 @@ class SoundCloudPlatform:
             stub_ids = [str(t.get("id")) for t in tracks if isinstance(t, dict) and "title" not in t and t.get("id")]
             hydrated_map = {}
             if stub_ids:
-                try:
-                    ids_param = ",".join(stub_ids)
-                    tracks_url = f"https://api-v2.soundcloud.com/tracks?ids={ids_param}&client_id={cid}"
-                    t_req = urllib.request.Request(tracks_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(t_req, timeout=6) as t_res:
-                        hydrated_list = json.loads(t_res.read().decode("utf-8"))
-                        for ht in hydrated_list:
-                            if isinstance(ht, dict) and ht.get("id"):
-                                hydrated_map[str(ht["id"])] = ht
-                except Exception as ex_h:
-                    print(f"[SoundCloud] Hydrate tracks error: {ex_h}")
+                # Chia thành các chunk 15 IDs để tránh URL quá dài và timeout
+                for i in range(0, len(stub_ids), 15):
+                    chunk = stub_ids[i:i + 15]
+                    try:
+                        ids_param = ",".join(chunk)
+                        tracks_url = f"https://api-v2.soundcloud.com/tracks?ids={ids_param}&client_id={cid}"
+                        t_req = urllib.request.Request(tracks_url, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(t_req, timeout=10) as t_res:
+                            hydrated_list = json.loads(t_res.read().decode("utf-8"))
+                            for ht in hydrated_list:
+                                if isinstance(ht, dict) and ht.get("id"):
+                                    hydrated_map[str(ht["id"])] = ht
+                    except Exception as ex_h:
+                        print(f"[SoundCloud] Hydrate tracks chunk error: {ex_h}")
 
             for t in tracks:
                 if not t or not isinstance(t, dict):
@@ -168,7 +171,7 @@ class SoundCloudPlatform:
                 if "title" not in t and tid in hydrated_map:
                     t = hydrated_map[tid]
 
-                title = t.get("title", "Unknown")
+                title = t.get("title") or t.get("permalink") or "SoundCloud Track"
                 user = t.get("user") or {}
                 artist = user.get("username") or "SoundCloud"
                 dur_ms = t.get("duration") or 0
@@ -197,12 +200,50 @@ class SoundCloudPlatform:
                  hoặc full URL (e.g. 'https://soundcloud.com/...')
         Trả về URL stream trực tiếp.
         """
-        # Xây dựng URL từ numeric ID hoặc b64_ ID
-        if song_id.startswith("b64_"):
+        cid = _get_sc_client_id()
+
+        # 1. Trích xuất track_id dạng số (nếu có) để gọi trực tiếp SoundCloud API v2 (siêu nhanh ~0.3s)
+        numeric_id = None
+        raw_url = None
+        if song_id.isdigit():
+            numeric_id = song_id
+        elif song_id.startswith("b64_"):
             import base64
             pad = len(song_id[4:]) % 4
             b64 = song_id[4:] + ("=" * (4 - pad) if pad else "")
-            url = base64.urlsafe_b64decode(b64).decode(errors="ignore")
+            raw_url = base64.urlsafe_b64decode(b64).decode(errors="ignore")
+            m = re.search(r'/tracks/(\d+)', raw_url)
+            if m:
+                numeric_id = m.group(1)
+        elif "/tracks/" in song_id:
+            m = re.search(r'/tracks/(\d+)', song_id)
+            if m:
+                numeric_id = m.group(1)
+
+        if numeric_id:
+            try:
+                t_url = f"https://api-v2.soundcloud.com/tracks/{numeric_id}?client_id={cid}"
+                t_req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(t_req, timeout=5) as t_res:
+                    t_data = json.loads(t_res.read().decode("utf-8"))
+                trans = t_data.get("media", {}).get("transcodings", [])
+                progs = [x for x in trans if x.get("format", {}).get("protocol") == "progressive"]
+                target = progs[0] if progs else (trans[0] if trans else None)
+                if target and target.get("url"):
+                    m_url = target["url"] + f"?client_id={cid}"
+                    m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(m_req, timeout=5) as m_res:
+                        m_data = json.loads(m_res.read().decode("utf-8"))
+                        direct = m_data.get("url")
+                        if direct:
+                            print(f"[SoundCloud] Direct API v2 stream URL obtained: {direct[:60]}...")
+                            return direct
+            except Exception as ex_v2:
+                print(f"[SoundCloud] Direct API v2 stream failed ({ex_v2}), falling back to yt-dlp...")
+
+        # 2. Fallback sang yt-dlp nếu không lấy được bằng API v2
+        if raw_url:
+            url = raw_url
         elif song_id.isdigit():
             url = f"https://api.soundcloud.com/tracks/{song_id}"
         elif song_id.startswith("http"):

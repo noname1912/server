@@ -494,6 +494,22 @@ def _auto_play_next() -> bool:
         _stream_cache.pop(f"{platform}:{song_id}", None)
         _stream_cache.pop(f"{platform}:{safe_id}", None)
 
+    # Pre-warm stream URL của bài tiếp theo
+    def _prewarm_next(plat=platform, sid=song_id, sfid=safe_id):
+        try:
+            p_obj = PLATFORMS.get(plat)
+            if p_obj and hasattr(p_obj, "get_stream_url"):
+                fresh = p_obj.get_stream_url(sid)
+                if fresh:
+                    with _cache_lock:
+                        _stream_cache[f"{plat}:{sid}"] = fresh
+                        _stream_cache[f"{plat}:{sfid}"] = fresh
+                    print(f"[PlayerHub] Pre-warmed next URL for {plat}:{sid}")
+        except Exception as ex_pw:
+            print(f"[PlayerHub] Pre-warm next error: {ex_pw}")
+
+    threading.Thread(target=_prewarm_next, daemon=True).start()
+
     _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
     _player_state["song"] = next_song
     _player_state["elapsed"] = 0
@@ -526,6 +542,22 @@ def player_play():
     with _cache_lock:
         _stream_cache.pop(f"{platform}:{song_id}", None)
         _stream_cache.pop(f"{platform}:{safe_id}", None)
+
+    # Pre-warm: Trích xuất ngay stream URL mới vào cache để khi Loa ESP32 kết nối có link ngay lập tức
+    def _prewarm_play(plat=platform, sid=song_id, sfid=safe_id):
+        try:
+            p_obj = PLATFORMS.get(plat)
+            if p_obj and hasattr(p_obj, "get_stream_url"):
+                fresh = p_obj.get_stream_url(sid)
+                if fresh:
+                    with _cache_lock:
+                        _stream_cache[f"{plat}:{sid}"] = fresh
+                        _stream_cache[f"{plat}:{sfid}"] = fresh
+                    print(f"[PlayerHub] Pre-warmed play URL for {plat}:{sid}")
+        except Exception as ex_pw:
+            print(f"[PlayerHub] Pre-warm play error: {ex_pw}")
+
+    threading.Thread(target=_prewarm_play, daemon=True).start()
 
     with _player_lock:
         # Cập nhật vị trí bài trong playlist nếu có
