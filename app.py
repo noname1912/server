@@ -273,6 +273,7 @@ def stream_audio(platform: str, song_id: str):
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
             "-headers", f"Referer: {_get_referer(platform)}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",
+            "-thread_queue_size", "4096",
             "-i", audio_url,
             "-vn",
             "-acodec", "libmp3lame",
@@ -280,14 +281,17 @@ def stream_audio(platform: str, song_id: str):
             "-ar", "44100",
             "-ac", "2",
             "-f", "mp3",
+            "-write_xing", "0",
+            "-preset", "ultrafast",
+            "-flush_packets", "1",
             "pipe:1"
         ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=8192)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32768)
 
         def generate_ffmpeg():
             try:
                 while True:
-                    chunk = proc.stdout.read(16384)
+                    chunk = proc.stdout.read(32768)
                     if not chunk:
                         break
                     yield chunk
