@@ -671,32 +671,7 @@ def player_status():
     Cả ESP32 Màn hình và ESP32 Loa đều gọi để đồng bộ:
     GET /api/player/status
     """
-    global _last_speaker_poll
-    now = time.time()
-    ua = request.headers.get("User-Agent", "")
-    is_speaker = ("ESP32" in ua) or (request.args.get("node") == "speaker")
-
     with _player_lock:
-        # Nếu là Loa ESP32 gọi và đã qua hơn 10 giây kể từ lần poll cuối (nghĩa là loa vừa bật nguồn)
-        if is_speaker:
-            if now - _last_speaker_poll > 10:
-                # Chỉ kích hoạt nếu không đang nghe bài dở
-                if _player_state["state"] != "playing" or (_player_state.get("song") and _player_state["song"].get("id") == "startup_jingle"):
-                    print(f"[PlayerHub] 🔊 LOA VỪA MỞ NGUỒN (Reconnect sau {int(now - _last_speaker_poll)}s) -> Tự động phát nhạc khởi động!")
-                    _player_state["seq"] = int(now * 1000) % 2000000000
-                    _player_state["state"] = "playing"
-                    _player_state["stream_url"] = "/api/stream/startup"
-                    _player_state["song"] = {
-                        "id": "startup_jingle",
-                        "platform": "system",
-                        "title": "Startup Chime (Khởi Động)",
-                        "artist": "ESP32 Music Box",
-                        "thumbnail": "",
-                        "duration": 3,
-                    }
-                    _player_state["elapsed"] = 0
-            _last_speaker_poll = now
-
         # Nếu stream_url là relative -> chuyển thành absolute URL cho ESP32 loa
         url = _player_state["stream_url"]
         if url.startswith("/"):
