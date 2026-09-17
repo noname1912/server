@@ -15,7 +15,7 @@ import subprocess
 from urllib.parse import unquote
 
 from flask import (Flask, jsonify, request, render_template,
-                   Response, stream_with_context, abort)
+                   Response, stream_with_context, abort, send_file)
 from flask_cors import CORS
 from PIL import Image
 
@@ -632,13 +632,71 @@ def player_control():
     return jsonify({"status": "ok", "state": _player_state["state"], "volume": _player_state["volume"]})
 
 
+# ─── Quản lý Startup Chime khi Loa mở nguồn ─────────────────────
+_last_speaker_poll = 0
+
+@app.route("/api/stream/startup")
+def stream_startup():
+    """Phát file âm thanh khởi động MP3"""
+    startup_path = Path(__file__).parent / "static" / "startup.mp3"
+    if not startup_path.exists():
+        abort(404, "Startup sound not found")
+    return send_file(str(startup_path), mimetype="audio/mpeg", conditional=True)
+
+
+@app.route("/api/player/startup", methods=["GET", "POST"])
+def trigger_startup_sound():
+    """Trigger phát chuông khởi động thủ công hoặc từ giao diện web"""
+    with _player_lock:
+        now = time.time()
+        _player_state["seq"] = int(now * 1000) % 2000000000
+        _player_state["state"] = "playing"
+        _player_state["stream_url"] = "/api/stream/startup"
+        _player_state["song"] = {
+            "id": "startup_jingle",
+            "platform": "system",
+            "title": "Startup Chime (Khởi Động)",
+            "artist": "ESP32 Music Box",
+            "thumbnail": "",
+            "duration": 3,
+        }
+        _player_state["elapsed"] = 0
+    print("[PlayerHub] Triggered startup chime!")
+    return jsonify({"status": "ok", "message": "Startup sound triggered"})
+
+
 @app.route("/api/player/status", methods=["GET"])
 def player_status():
     """
     Cả ESP32 Màn hình và ESP32 Loa đều gọi để đồng bộ:
     GET /api/player/status
     """
+    global _last_speaker_poll
+    now = time.time()
+    ua = request.headers.get("User-Agent", "")
+    is_speaker = ("ESP32" in ua) or (request.args.get("node") == "speaker")
+
     with _player_lock:
+        # Nếu là Loa ESP32 gọi và đã qua hơn 10 giây kể từ lần poll cuối (nghĩa là loa vừa bật nguồn)
+        if is_speaker:
+            if now - _last_speaker_poll > 10:
+                # Chỉ kích hoạt nếu không đang nghe bài dở
+                if _player_state["state"] != "playing" or (_player_state.get("song") and _player_state["song"].get("id") == "startup_jingle"):
+                    print(f"[PlayerHub] 🔊 LOA VỪA MỞ NGUỒN (Reconnect sau {int(now - _last_speaker_poll)}s) -> Tự động phát nhạc khởi động!")
+                    _player_state["seq"] = int(now * 1000) % 2000000000
+                    _player_state["state"] = "playing"
+                    _player_state["stream_url"] = "/api/stream/startup"
+                    _player_state["song"] = {
+                        "id": "startup_jingle",
+                        "platform": "system",
+                        "title": "Startup Chime (Khởi Động)",
+                        "artist": "ESP32 Music Box",
+                        "thumbnail": "",
+                        "duration": 3,
+                    }
+                    _player_state["elapsed"] = 0
+            _last_speaker_poll = now
+
         # Nếu stream_url là relative -> chuyển thành absolute URL cho ESP32 loa
         url = _player_state["stream_url"]
         if url.startswith("/"):
@@ -675,6 +733,14 @@ def player_report():
 
         if event == "eof":
             cur_elapsed = int(elapsed or 0)
+            # Nếu là bài khởi động vừa phát xong -> chuyển về trạng thái chờ
+            if _player_state.get("song") and _player_state["song"].get("id") == "startup_jingle":
+                print("[PlayerHub] >>> Nhạc khởi động đã phát xong! Chuyển trạng thái sang sẵn sàng.")
+                _player_state["state"] = "stopped"
+                _player_state["stream_url"] = ""
+                _player_state["song"] = None
+                return jsonify({"status": "ok", "action": "standby"})
+
             # Bỏ qua EOF nếu bài hát vừa bắt đầu < 5 giây (false EOF khi ESP32 mất kết nối tạm thời)
             if cur_elapsed < 5:
                 print(f"[PlayerHub] Bỏ qua EOF giả (elapsed={cur_elapsed}s < 5s)")
