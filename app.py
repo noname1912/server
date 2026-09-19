@@ -317,6 +317,7 @@ def stream_audio(platform: str, song_id: str):
                 "-thread_queue_size", "4096",
                 "-i", audio_url,
                 "-vn",
+                "-af", "volume=0.80",
                 "-acodec", "libmp3lame",
                 "-b:a", "128k",
                 "-ar", "44100",
@@ -507,7 +508,7 @@ _player_state = {
     "seq": int(time.time()), # Dùng timestamp để luôn tăng và không bao giờ bị trùng
     "song": None,            # Thông tin SongInfo hiện tại
     "stream_url": "",        # URL stream cho ESP32 loa
-    "volume": 15,            # 0–21
+    "volume": 11,            # 0–21 (Mức 11: Chuẩn an toàn cho PAM8403, chống méo clipping và rè)
     "elapsed": 0,            # Giây đã phát
     "last_update": 0,
 }
