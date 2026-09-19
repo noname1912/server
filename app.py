@@ -227,6 +227,37 @@ def trending():
         return jsonify({"error": str(e)}), 500
 
 
+# ─── Disk Audio Cache (Chống giật tuyệt đối cho bài dài YouTube / Zing) ─
+AUDIO_CACHE_DIR = Path(__file__).parent / "audio_cache"
+AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+
+_transcode_lock = threading.Lock()
+_active_transcodes: dict[str, subprocess.Popen] = {}
+
+def _cleanup_old_cache(max_files: int = 60):
+    """Giữ lại 60 bài hát gần nhất trong cache, tự động xóa bài cũ."""
+    try:
+        files = list(AUDIO_CACHE_DIR.glob("*.mp3"))
+        if len(files) > max_files:
+            files.sort(key=lambda f: f.stat().st_mtime)
+            for f in files[:-max_files]:
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
+    except Exception as ex:
+        print(f"[Cache] Cleanup error: {ex}")
+
+def _get_cache_paths(platform: str, song_id: str):
+    import hashlib
+    clean_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in song_id)[:40]
+    hash_id  = hashlib.md5(f"{platform}:{song_id}".encode()).hexdigest()[:10]
+    base_name = f"{platform}_{clean_id}_{hash_id}"
+    final_mp3 = AUDIO_CACHE_DIR / f"{base_name}.mp3"
+    tmp_mp3   = AUDIO_CACHE_DIR / f"{base_name}.tmp.mp3"
+    return final_mp3, tmp_mp3
+
+
 # ─── Stream Audio ───────────────────────────────────────────────
 
 @app.route("/api/stream/<platform>/<path:song_id>")
@@ -234,18 +265,22 @@ def stream_audio(platform: str, song_id: str):
     """
     GET /api/stream/<platform>/<song_id>
     Proxy stream audio về cho ESP32.
-    - ZingMP3 song_id: encodeId (e.g. ZW9AAZOW)
-    - SoundCloud song_id: URL encode của track URL
-    - YouTube song_id: video ID (e.g. dQw4w9WgXcQ)
-
-    Hỗ trợ HTTP Range requests để ESP32-audioI2S hoạt động đúng.
+    Tự động đệm vào ổ cứng SSD cục bộ (audio_cache) để bài dài (10p, 30p, 1h)
+    không bao giờ bị Google Video throttle hay đứt gãy kết nối!
     """
     if platform not in PLATFORMS:
         abort(400, "Unknown platform")
 
     song_id = unquote(song_id)
+    final_mp3, tmp_mp3 = _get_cache_paths(platform, song_id)
 
-    # Kiểm tra cache
+    # 1. NẾU ĐÃ CÓ TRONG CACHE HOÀN CHỈNH -> PHÁT NGAY LẬP TỨC 100% MƯỢT
+    if final_mp3.exists() and final_mp3.stat().st_size > 20000:
+        print(f"[Stream] Serving cached: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
+        return send_file(str(final_mp3), mimetype="audio/mpeg", conditional=True)
+
+    # 2. NẾU CHƯA CÓ TRONG CACHE:
+    # Lấy stream URL gốc
     cache_key = f"{platform}:{song_id}"
     with _cache_lock:
         audio_url = _stream_cache.get(cache_key)
@@ -256,104 +291,106 @@ def stream_audio(platform: str, song_id: str):
         if not audio_url:
             abort(404, "Cannot get stream URL")
         with _cache_lock:
-            # Giới hạn cache 100 entries
             if len(_stream_cache) > 100:
                 _stream_cache.clear()
             _stream_cache[cache_key] = audio_url
 
-    print(f"[Stream] Proxying: {audio_url[:80]}...")
+    print(f"[Stream] Caching & streaming: {platform}:{song_id} -> {tmp_mp3.name}")
 
-    # ── Chuyển đổi trực tiếp sang chuẩn MP3 (128kbps) bằng ffmpeg ──
-    # Giúp YouTube/ZingMP3/SoundCloud phát ngay lập tức trên ESP32 mà không bị lỗi header MP4
-    try:
-        cmd = [
-            "ffmpeg",
-            "-loglevel", "quiet",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
-            "-headers", f"Referer: {_get_referer(platform)}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",
-            "-thread_queue_size", "4096",
-            "-i", audio_url,
-            "-vn",
-            "-acodec", "libmp3lame",
-            "-b:a", "128k",
-            "-ar", "44100",
-            "-ac", "2",
-            "-f", "mp3",
-            "-write_xing", "0",
-            "-preset", "ultrafast",
-            "-flush_packets", "1",
-            "pipe:1"
-        ]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32768)
+    # Bắt đầu transcode ghi vào tmp_mp3 với tốc độ tối đa (unthrottled)
+    with _transcode_lock:
+        proc = _active_transcodes.get(cache_key)
+        if proc is None or proc.poll() is not None:
+            # Xóa tmp cũ nếu có
+            if tmp_mp3.exists():
+                try: tmp_mp3.unlink()
+                except Exception: pass
 
-        def generate_ffmpeg():
-            try:
-                while True:
-                    chunk = proc.stdout.read(32768)
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-loglevel", "quiet",
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+                "-headers", f"Referer: {_get_referer(platform)}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",
+                "-thread_queue_size", "4096",
+                "-i", audio_url,
+                "-vn",
+                "-acodec", "libmp3lame",
+                "-b:a", "128k",
+                "-ar", "44100",
+                "-ac", "2",
+                "-f", "mp3",
+                "-write_xing", "0",
+                str(tmp_mp3)
+            ]
+            proc = subprocess.Popen(cmd)
+            _active_transcodes[cache_key] = proc
+
+            # Thread giám sát khi transcode xong -> đổi tên thành final_mp3
+            def _watch_transcode(p=proc, tmp_p=tmp_mp3, final_p=final_mp3, ckey=cache_key):
                 try:
-                    proc.kill()
-                    proc.wait(timeout=1)
-                except Exception:
-                    pass
+                    p.wait()
+                    if p.returncode == 0 and tmp_p.exists() and tmp_p.stat().st_size > 20000:
+                        if final_p.exists():
+                            try: final_p.unlink()
+                            except Exception: pass
+                        tmp_p.rename(final_p)
+                        print(f"[Stream-Cache] Hoàn tất cache: {final_p.name} ({final_p.stat().st_size // 1024} KB)")
+                        _cleanup_old_cache(60)
+                    else:
+                        print(f"[Stream-Cache] Transcode finished/aborted for {ckey}")
+                except Exception as ex:
+                    print(f"[Stream-Cache] Watch error: {ex}")
+                finally:
+                    with _transcode_lock:
+                        _active_transcodes.pop(ckey, None)
 
-        return Response(
-            stream_with_context(generate_ffmpeg()),
-            status=200,
-            headers={
-                "Content-Type": "audio/mpeg",
-                "Cache-Control": "no-cache",
-                "Accept-Ranges": "none",
-                "Access-Control-Allow-Origin": "*",
-            },
-            direct_passthrough=True,
-        )
+            threading.Thread(target=_watch_transcode, daemon=True).start()
 
-    except Exception as ex:
-        print(f"[Stream] FFmpeg error: {ex}, fallback to direct proxy...")
+    # 3. STREAM PROGRESSIVE: Đọc từ file tmp_mp3 đang lớn dần
+    # Chờ file có ít nhất 16KB dữ liệu ban đầu (~1 giây nhạc)
+    t_wait = time.time()
+    while not tmp_mp3.exists() or tmp_mp3.stat().st_size < 16384:
+        if proc.poll() is not None and (not tmp_mp3.exists() or tmp_mp3.stat().st_size == 0):
+            print("[Stream] FFmpeg khởi động thất bại!")
+            abort(502, "Transcode startup failed")
+        time.sleep(0.04)
+        if time.time() - t_wait > 6:
+            break
 
-    # ── Fallback trực tiếp nếu không gọi được ffmpeg ─────────────
-    range_header = request.headers.get("Range")
-    headers = {
-        "User-Agent": "Mozilla/5.0 (compatible; ESP32AudioPlayer/1.0)",
-        "Referer": _get_referer(platform),
-    }
-    if range_header:
-        headers["Range"] = range_header
-
-    try:
-        req = urllib.request.Request(audio_url, headers=headers)
-        remote = urllib.request.urlopen(req, timeout=15)
-        content_type = remote.headers.get("Content-Type", "audio/mpeg")
-
-        def generate():
-            try:
+    def generate_progressive(tmp_p=tmp_mp3, p=proc, final_p=final_mp3):
+        curr_file = final_p if final_p.exists() else tmp_p
+        try:
+            with open(curr_file, "rb") as f:
                 while True:
-                    chunk = remote.read(16384)
-                    if not chunk:
-                        break
-                    yield chunk
-            finally:
-                remote.close()
+                    chunk = f.read(4096)
+                    if chunk:
+                        yield chunk
+                    else:
+                        # Kiểm tra xem transcode đã hoàn tất chưa
+                        if p.poll() is not None:
+                            rem = f.read()
+                            if rem:
+                                yield rem
+                            break
+                        time.sleep(0.04)
+        except Exception:
+            # Client ngắt kết nối
+            pass
 
-        return Response(
-            stream_with_context(generate()),
-            status=200,
-            headers={
-                "Content-Type": content_type,
-                "Cache-Control": "no-cache",
-                "Access-Control-Allow-Origin": "*",
-            },
-            direct_passthrough=True,
-        )
-    except Exception as e:
-        print(f"[Stream] Error: {e}")
-        abort(502, str(e))
+    return Response(
+        stream_with_context(generate_progressive()),
+        status=200,
+        headers={
+            "Content-Type": "audio/mpeg",
+            "Cache-Control": "no-cache",
+            "Accept-Ranges": "none",
+            "Access-Control-Allow-Origin": "*",
+        },
+        direct_passthrough=True,
+    )
 
 
 def _get_referer(platform: str) -> str:
