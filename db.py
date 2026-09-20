@@ -64,6 +64,17 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS play_history (
+                id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                title TEXT NOT NULL,
+                artist TEXT DEFAULT '',
+                duration INTEGER DEFAULT 0,
+                thumbnail TEXT DEFAULT '',
+                played_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
     conn.close()
     print(f"[DB] SQLite database initialized at: {DB_PATH}")
 
@@ -331,3 +342,68 @@ def get_favorite_ids() -> list[str]:
         return [row["id"] for row in cursor.fetchall()]
     finally:
         conn.close()
+
+
+# ─── Play History (Tối đa 20 bài gần nhất) ──────────────────────
+
+def add_play_history(song: dict):
+    """Lưu bài hát vào lịch sử nghe, giữ tối đa 20 bài gần nhất."""
+    song_id = str(song.get("id") or song.get("song_id") or "").strip()
+    if not song_id:
+        return
+    conn = get_db()
+    try:
+        with conn:
+            conn.execute("DELETE FROM play_history WHERE id = ?", (song_id,))
+            conn.execute("""
+                INSERT INTO play_history (id, platform, title, artist, duration, thumbnail, played_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (
+                song_id,
+                song.get("platform", "youtube"),
+                song.get("title", "Unknown"),
+                song.get("artist", "Unknown"),
+                int(song.get("duration", 0)),
+                song.get("thumbnail", ""),
+            ))
+            conn.execute("""
+                DELETE FROM play_history WHERE rowid NOT IN (
+                    SELECT rowid FROM play_history ORDER BY played_at DESC LIMIT 20
+                )
+            """)
+    except Exception as ex:
+        print(f"[DB] add_play_history error: {ex}")
+    finally:
+        conn.close()
+
+
+def get_play_history(limit: int = 20) -> list[dict]:
+    """Lấy danh sách tối đa 20 bài đã nghe gần nhất."""
+    conn = get_db()
+    try:
+        cursor = conn.execute("""
+            SELECT id, platform, title, artist, duration, thumbnail,
+                   strftime('%Y-%m-%dT%H:%M:%SZ', played_at) as played_at
+            FROM play_history
+            ORDER BY played_at DESC
+            LIMIT ?
+        """, (limit,))
+        return [dict(row) for row in cursor.fetchall()]
+    except Exception as ex:
+        print(f"[DB] get_play_history error: {ex}")
+        return []
+    finally:
+        conn.close()
+
+
+def clear_play_history():
+    """Xóa toàn bộ lịch sử nghe nhạc."""
+    conn = get_db()
+    try:
+        with conn:
+            conn.execute("DELETE FROM play_history")
+    except Exception as ex:
+        print(f"[DB] clear_play_history error: {ex}")
+    finally:
+        conn.close()
+

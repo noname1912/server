@@ -555,6 +555,10 @@ def _auto_play_next() -> bool:
     _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
     _player_state["song"] = next_song
     _player_state["elapsed"] = 0
+    try:
+        db.add_play_history(next_song)
+    except Exception:
+        pass
     print(f"[PlayerHub-AutoNext] Auto-play #{_player_state['seq']}: {next_song.get('title')} ({platform})")
     return True
 
@@ -562,30 +566,28 @@ def _auto_play_next() -> bool:
 @app.route("/api/player/play", methods=["POST"])
 def player_play():
     """
-    ESP32 Màn hình gọi khi chọn bài:
+    Phát bài hát ngay lập tức:
     POST /api/player/play
     Body JSON: {"song_id":"...", "platform":"youtube|soundcloud|zing", "title":"...", "artist":"...", "thumbnail":"...", "duration":180}
     """
     data = request.get_json(force=True, silent=True) or {}
     platform = str(data.get("platform", "youtube")).lower()
-    song_id  = str(data.get("song_id", "")).strip()
+    song_id  = str(data.get("song_id") or data.get("id") or "").strip()
 
     if not song_id:
         return jsonify({"error": "Missing song_id"}), 400
 
-    # Lấy stream url an toàn cho ESP32 Audio parser (tránh chứa http:// trong path)
+    # Lấy stream url an toàn cho ESP32 Audio parser
     if song_id.startswith("http"):
         import base64
         safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
     else:
         safe_id = song_id
 
-    # Xóa cache cũ của bài hát này để ép buộc lấy link stream mới 100% (tránh lỗi 403 link hết hạn khi nghe lại bài cũ)
     with _cache_lock:
         _stream_cache.pop(f"{platform}:{song_id}", None)
         _stream_cache.pop(f"{platform}:{safe_id}", None)
 
-    # Pre-warm: Trích xuất ngay stream URL mới vào cache để khi Loa ESP32 kết nối có link ngay lập tức
     def _prewarm_play(plat=platform, sid=song_id, sfid=safe_id):
         try:
             p_obj = PLATFORMS.get(plat)
@@ -601,52 +603,52 @@ def player_play():
 
     threading.Thread(target=_prewarm_play, daemon=True).start()
 
+    song_info = {
+        "id": song_id,
+        "platform": platform,
+        "title": data.get("title", "Unknown"),
+        "artist": data.get("artist", "Unknown"),
+        "thumbnail": data.get("thumbnail", ""),
+        "duration": int(data.get("duration", 0)),
+    }
+
     with _player_lock:
-        # Cập nhật vị trí bài trong playlist nếu có
         global _playlist, _playlist_idx
         for i, s in enumerate(_playlist):
             if str(s.get("id")) == song_id:
                 _playlist_idx = i
                 break
         else:
-            _playlist.append({
-                "id": song_id,
-                "platform": platform,
-                "title": data.get("title", "Unknown"),
-                "artist": data.get("artist", "Unknown"),
-                "thumbnail": data.get("thumbnail", ""),
-                "duration": int(data.get("duration", 0)),
-            })
+            _playlist.append(song_info)
             _playlist_idx = len(_playlist) - 1
 
         _player_state["seq"] = int(time.time() * 1000) % 2000000000
         _player_state["state"] = "playing"
         _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
-        _player_state["song"] = {
-            "id": song_id,
-            "platform": platform,
-            "title": data.get("title", "Unknown"),
-            "artist": data.get("artist", "Unknown"),
-            "thumbnail": data.get("thumbnail", ""),
-            "duration": int(data.get("duration", 0)),
-        }
+        _player_state["song"] = song_info
         _player_state["elapsed"] = 0
 
-    print(f"[PlayerHub] PLAY #{_player_state['seq']}: {data.get('title')} ({platform})")
-    return jsonify({"status": "ok", "seq": _player_state["seq"]})
+    try:
+        db.add_play_history(song_info)
+    except Exception as ex_h:
+        print(f"[PlayerHub] Add history error: {ex_h}")
+
+    print(f"[PlayerHub] PLAY #{_player_state['seq']}: {song_info.get('title')} ({platform})")
+    return jsonify({"status": "ok", "seq": _player_state["seq"], "song": song_info})
 
 
 @app.route("/api/player/control", methods=["POST"])
 def player_control():
     """
-    Điều khiển Play/Pause/Stop/Volume/Next:
+    Điều khiển Play/Pause/Stop/Volume/Next/Prev:
     POST /api/player/control
-    Body JSON: {"action":"pause|resume|stop|vol_up|vol_down|set_vol|next", "value":15}
+    Body JSON: {"action":"pause|resume|stop|vol_up|vol_down|set_vol|next|prev", "value":15}
     """
     data   = request.get_json(force=True, silent=True) or {}
     action = str(data.get("action", "")).lower()
 
     with _player_lock:
+        global _playlist, _playlist_idx
         if action == "pause":
             _player_state["state"] = "paused"
         elif action == "resume":
@@ -661,13 +663,141 @@ def player_control():
         elif action == "vol_down":
             _player_state["volume"] = max(0, _player_state["volume"] - 2)
         elif action == "set_vol":
-            _player_state["volume"] = max(0, min(21, int(data.get("value", 15))))
+            _player_state["volume"] = max(0, min(21, int(data.get("value", 11))))
         elif action == "next":
             if not _auto_play_next():
                 _player_state["state"] = "next_requested"
+        elif action == "prev":
+            if _playlist and len(_playlist) > 0:
+                _playlist_idx = (_playlist_idx - 1) % len(_playlist)
+                prev_song = _playlist[_playlist_idx]
+                platform = str(prev_song.get("platform", "youtube")).lower()
+                song_id  = str(prev_song.get("id", "")).strip()
+                if song_id.startswith("http"):
+                    import base64
+                    safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
+                else:
+                    safe_id = song_id
+                _player_state["seq"] = int(time.time() * 1000) % 2000000000
+                _player_state["state"] = "playing"
+                _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
+                _player_state["song"] = prev_song
+                _player_state["elapsed"] = 0
+                try: db.add_play_history(prev_song)
+                except Exception: pass
 
     print(f"[PlayerHub] CONTROL: {action} (vol={_player_state['volume']}, state={_player_state['state']})")
-    return jsonify({"status": "ok", "state": _player_state["state"], "volume": _player_state["volume"]})
+    return jsonify({"status": "ok", "state": _player_state["state"], "volume": _player_state["volume"], "song": _player_state.get("song")})
+
+
+# ─── Queue / Up Next (Danh sách phát & Hàng đợi) ───────────────
+
+@app.route("/api/player/queue", methods=["GET"])
+def player_queue_get():
+    """Lấy toàn bộ danh sách hàng đợi phát."""
+    with _player_lock:
+        return jsonify({
+            "queue": _playlist,
+            "current_index": _playlist_idx,
+            "current_song": _player_state.get("song")
+        })
+
+
+@app.route("/api/player/queue/add", methods=["POST"])
+def player_queue_add():
+    """
+    Thêm bài hát vào hàng đợi:
+    Body: {"song": {...}, "position": "next" | "end"}
+    position="next": Chèn ngay sau bài đang phát (Phát tiếp theo)
+    position="end": Thêm vào cuối hàng đợi
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    song = data.get("song")
+    if not song or not song.get("id"):
+        return jsonify({"error": "Missing song object"}), 400
+
+    position = str(data.get("position", "end")).lower()
+
+    with _player_lock:
+        global _playlist, _playlist_idx
+        # Định dạng chuẩn song dict
+        song_clean = {
+            "id": str(song.get("id")),
+            "platform": str(song.get("platform", "youtube")).lower(),
+            "title": str(song.get("title", "Unknown")),
+            "artist": str(song.get("artist", "Unknown")),
+            "thumbnail": str(song.get("thumbnail", "")),
+            "duration": int(song.get("duration", 0)),
+        }
+
+        if position == "next" and _playlist:
+            insert_pos = _playlist_idx + 1
+            _playlist.insert(insert_pos, song_clean)
+            print(f"[Queue] Inserted NEXT at index {insert_pos}: {song_clean['title']}")
+        else:
+            _playlist.append(song_clean)
+            print(f"[Queue] Appended to END: {song_clean['title']}")
+
+        return jsonify({
+            "status": "ok",
+            "queue_len": len(_playlist),
+            "current_index": _playlist_idx,
+            "position": position
+        })
+
+
+@app.route("/api/player/queue/remove", methods=["POST"])
+def player_queue_remove():
+    """Xóa 1 bài khỏi hàng đợi theo index."""
+    data = request.get_json(force=True, silent=True) or {}
+    idx = data.get("index")
+    with _player_lock:
+        global _playlist, _playlist_idx
+        if idx is not None and 0 <= int(idx) < len(_playlist):
+            idx = int(idx)
+            removed = _playlist.pop(idx)
+            if idx < _playlist_idx:
+                _playlist_idx -= 1
+            elif idx == _playlist_idx:
+                # Nếu xóa bài đang phát -> tự chuyển bài tiếp
+                if _playlist:
+                    _playlist_idx = _playlist_idx % len(_playlist)
+                else:
+                    _playlist_idx = 0
+            print(f"[Queue] Removed #{idx}: {removed.get('title')}")
+            return jsonify({"status": "ok", "queue_len": len(_playlist)})
+    return jsonify({"error": "Invalid index"}), 400
+
+
+@app.route("/api/player/queue/clear", methods=["POST"])
+def player_queue_clear():
+    """Xóa sạch hàng đợi (giữ lại bài đang phát nếu có)."""
+    with _player_lock:
+        global _playlist, _playlist_idx
+        if _player_state.get("song"):
+            _playlist = [_player_state["song"]]
+            _playlist_idx = 0
+        else:
+            _playlist = []
+            _playlist_idx = 0
+        return jsonify({"status": "ok", "queue_len": len(_playlist)})
+
+
+# ─── Lịch sử nghe nhạc (Tối đa 20 bài) ──────────────────────────
+
+@app.route("/api/history", methods=["GET"])
+def get_history():
+    """GET /api/history -> Trả về tối đa 20 bài hát đã nghe gần nhất."""
+    history = db.get_play_history(limit=20)
+    return jsonify(history)
+
+
+@app.route("/api/history/clear", methods=["POST"])
+def clear_history():
+    """POST /api/history/clear -> Xóa sạch lịch sử nghe nhạc."""
+    db.clear_play_history()
+    return jsonify({"status": "ok"})
+
 
 
 # ─── Quản lý Startup Chime khi Loa mở nguồn ─────────────────────
