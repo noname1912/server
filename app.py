@@ -134,11 +134,12 @@ def playlist_tracks():
 
 # ─── Lịch sử tìm kiếm & Gợi ý (Search History & Suggestions) ──
 
-@app.route("/api/history", methods=["GET", "POST"])
+@app.route("/api/search/history", methods=["GET", "POST"])
+@app.route("/api/suggest/history", methods=["GET", "POST"])
 def search_history():
     """
-    GET  /api/history?limit=5  -> Trả về danh sách [str] các tìm kiếm gần nhất
-    POST /api/history          -> Thêm từ khóa {"q": "..."}
+    GET  /api/search/history?limit=5  -> Trả về danh sách [str] các tìm kiếm gần nhất
+    POST /api/search/history          -> Thêm từ khóa {"q": "..."}
     """
     if request.method == "POST":
         data = request.get_json(force=True, silent=True) or {}
@@ -786,6 +787,8 @@ def player_queue_clear():
 # ─── Lịch sử nghe nhạc (Tối đa 20 bài) ──────────────────────────
 
 @app.route("/api/history", methods=["GET"])
+@app.route("/api/play/history", methods=["GET"])
+@app.route("/api/play_history", methods=["GET"])
 def get_history():
     """GET /api/history -> Trả về tối đa 20 bài hát đã nghe gần nhất."""
     history = db.get_play_history(limit=20)
