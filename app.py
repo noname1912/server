@@ -638,20 +638,57 @@ def thumbnail():
         # Resize về đúng độ phân giải bằng LANCZOS trước để ảnh mịn và không méo
         img = img.resize((size, size), Image.Resampling.LANCZOS)
 
-        # Pipeline gốc: sắc nét, tương phản cao, không phơi sáng
+        # Pipeline màu sắc cho TFT RGB565: bão hòa cao + contrast tốt + sắc nét
         from PIL import ImageEnhance, ImageFilter
-        img = ImageEnhance.Contrast(img).enhance(1.15)        # Tương phản sâu, rõ chi tiết
-        img = ImageEnhance.Color(img).enhance(1.10)           # Màu sắc tươi tự nhiên
-        img = img.filter(ImageFilter.UnsharpMask(radius=1.5, percent=120, threshold=3))  # Sắc nét viền
+        import numpy as np
+        img = ImageEnhance.Contrast(img).enhance(1.20)        # Tương phản cao hơn để rõ chi tiết
+        img = ImageEnhance.Color(img).enhance(1.40)           # Bão hòa màu cao hơn bù cho RGB565
+        img = ImageEnhance.Sharpness(img).enhance(1.5)        # Sắc nét thêm
+        img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=130, threshold=2))
 
-        # Chuyển sang RGB565 big-endian với color dithering
-        pixels = img.load()
+        # Floyd-Steinberg Dithering → RGB565: loại bỏ posterize/banding, màu gradient mượt
+        # Chuyển sang numpy float32 để tính sai số
+        arr = np.array(img, dtype=np.float32)  # shape (H, W, 3), range 0-255
+        H, W = arr.shape[:2]
         buf = bytearray(size * size * 2)
         idx = 0
-        for y in range(size):
-            for x in range(size):
-                r, g, b = pixels[x, y]
-                rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+
+        for y in range(H):
+            for x in range(W):
+                r_old = int(min(255, max(0, arr[y, x, 0])))
+                g_old = int(min(255, max(0, arr[y, x, 1])))
+                b_old = int(min(255, max(0, arr[y, x, 2])))
+
+                # Lượng tử hóa về RGB565
+                r_new = (r_old & 0xF8)          # 5-bit R: giữ 5 bit cao
+                g_new = (g_old & 0xFC)          # 6-bit G: giữ 6 bit cao
+                b_new = (b_old & 0xF8)          # 5-bit B: giữ 5 bit cao
+
+                # Sai số lượng tử hóa
+                er = r_old - r_new
+                eg = g_old - g_new
+                eb = b_old - b_new
+
+                # Phân tán sai số Floyd-Steinberg sang 4 pixel lân cận
+                if x + 1 < W:
+                    arr[y,   x+1, 0] += er * 7 / 16
+                    arr[y,   x+1, 1] += eg * 7 / 16
+                    arr[y,   x+1, 2] += eb * 7 / 16
+                if y + 1 < H:
+                    if x > 0:
+                        arr[y+1, x-1, 0] += er * 3 / 16
+                        arr[y+1, x-1, 1] += eg * 3 / 16
+                        arr[y+1, x-1, 2] += eb * 3 / 16
+                    arr[y+1, x,   0] += er * 5 / 16
+                    arr[y+1, x,   1] += eg * 5 / 16
+                    arr[y+1, x,   2] += eb * 5 / 16
+                    if x + 1 < W:
+                        arr[y+1, x+1, 0] += er * 1 / 16
+                        arr[y+1, x+1, 1] += eg * 1 / 16
+                        arr[y+1, x+1, 2] += eb * 1 / 16
+
+                # Ghi big-endian RGB565
+                rgb565 = ((r_new & 0xF8) << 8) | ((g_new & 0xFC) << 3) | (b_new >> 3)
                 buf[idx]     = (rgb565 >> 8) & 0xFF
                 buf[idx + 1] = rgb565 & 0xFF
                 idx += 2
