@@ -155,6 +155,145 @@ def search_history():
         return jsonify(history)
 
 
+# ─── Lyrics (LRC synced lyrics) ──────────────────────────────
+_lyrics_cache_dir = Path("audio_cache")
+_lyrics_cache_dir.mkdir(exist_ok=True)
+
+def _get_youtube_subtitles(video_id: str) -> str:
+    """Trích xuất phụ đề / lời bài hát trực tiếp từ YouTube."""
+    try:
+        import yt_dlp
+        ydl_opts = {
+            "quiet": True,
+            "skip_download": True,
+            "no_warnings": True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(f"https://www.youtube.com/watch?v={video_id}", download=False)
+            subs = info.get("subtitles", {})
+            auto = info.get("automatic_captions", {})
+            chosen_url = None
+            # Ưu tiên tiếng Việt, rồi tiếng Anh, rồi bất kỳ ngôn ngữ nào
+            for lang in ["vi", "vi-orig", "en"]:
+                sub_list = subs.get(lang) or auto.get(lang)
+                if sub_list:
+                    for s in sub_list:
+                        if s.get("ext") == "json3" or "fmt=json3" in s.get("url", ""):
+                            chosen_url = s.get("url")
+                            break
+                    if chosen_url:
+                        break
+                    chosen_url = sub_list[0].get("url")
+                    break
+
+            if not chosen_url:
+                all_subs = list(subs.values()) + list(auto.values())
+                if all_subs and all_subs[0]:
+                    chosen_url = all_subs[0][0].get("url")
+
+            if chosen_url:
+                import urllib.request, json
+                req = urllib.request.Request(chosen_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=6) as resp:
+                    raw = resp.read().decode("utf-8", errors="ignore")
+                    d = json.loads(raw)
+                    events = d.get("events", [])
+                    lines = []
+                    for ev in events:
+                        t_ms = ev.get("tStartMs", 0)
+                        txt = "".join(s.get("utf8", "") for s in ev.get("segs", [])).strip()
+                        if txt and txt != "\n":
+                            mm = int(t_ms // 60000)
+                            ss = int((t_ms % 60000) // 1000)
+                            cs = int((t_ms % 1000) // 10)
+                            lines.append(f"[{mm:02d}:{ss:02d}.{cs:02d}]{txt}")
+                    if lines:
+                        return "\n".join(lines)
+    except Exception as e:
+        print(f"[Lyrics] Subtitle error for {video_id}: {e}")
+    return ""
+
+@app.route("/api/lyrics", methods=["GET"])
+def get_lyrics():
+    """
+    GET /api/lyrics?id=<id>&title=<title>&artist=<artist>&platform=<plat>
+    Trả về định dạng chuỗi chuẩn LRC: [mm:ss.xx] Lời bài hát
+    """
+    song_id  = request.args.get("id", "").strip()
+    title    = request.args.get("title", "").strip()
+    artist   = request.args.get("artist", "").strip()
+    platform = request.args.get("platform", "zing").lower()
+
+    if not song_id and not title:
+        return "Song ID or Title required", 400
+
+    cache_file = _lyrics_cache_dir / f"lyrics_{song_id or 'q'}.lrc"
+    if cache_file.exists():
+        try:
+            with open(cache_file, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            if content.strip():
+                return Response(content, mimetype="text/plain; charset=utf-8")
+        except Exception:
+            pass
+
+    lrc_text = ""
+    # 1. Trích xuất từ YouTube video nếu có ID 11 ký tự
+    if len(song_id) == 11 or platform in ("youtube", "zing"):
+        if len(song_id) == 11:
+            lrc_text = _get_youtube_subtitles(song_id)
+
+    # 2. Thử lấy lyric từ LRCLIB nếu chưa có
+    if not lrc_text and title:
+        try:
+            import urllib.request, urllib.parse
+            clean_t = title.split("(")[0].split("[")[0].split("-")[0].strip()
+            clean_a = artist.split(",")[0].split("&")[0].strip() if artist else ""
+            query_url = f"https://lrclib.net/api/get?track_name={urllib.parse.quote(clean_t)}"
+            if clean_a and clean_a != "Unknown":
+                query_url += f"&artist_name={urllib.parse.quote(clean_a)}"
+            req = urllib.request.Request(query_url, headers={"User-Agent": "ESP32MusicPlayer/2.0"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                if resp.status == 200:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    lrc_text = data.get("syncedLyrics") or ""
+        except Exception:
+            pass
+
+    # 3. Dự phòng giả lập theo đúng tên bài & ca sĩ nếu không tìm thấy lời online
+    if not lrc_text.strip():
+        display_title  = title if title else "Dang Phat"
+        display_artist = artist if artist else "Unknown Artist"
+        lrc_lines = [
+            f"[00:00.00]{display_title}",
+            f"[00:04.00]{display_artist}",
+            "[00:08.00]Giai dieu dang vang len...",
+            "[00:20.00]Cam nhan am thanh chat luong cao...",
+            "[00:45.00]Giai dieu tuyet voi...",
+            "[01:15.00]Cam on ban da lang nghe!",
+        ]
+        lrc_text = "\n".join(lrc_lines)
+    else:
+        lines = lrc_text.splitlines()
+        if lines and not lines[0].startswith("[00:00"):
+            display_t = title if title else "Am Nhac Viet"
+            lines.insert(0, f"[00:00.00]{display_t}")
+            lrc_text = "\n".join(lines)
+
+    lrc_text = lrc_text.replace("\r", "").strip()
+
+    # Lưu cache
+    try:
+        with open(cache_file, "w", encoding="utf-8") as f:
+            f.write(lrc_text)
+    except Exception as e:
+        print(f"[Lyrics] Cache write error: {e}")
+
+    return Response(lrc_text, mimetype="text/plain; charset=utf-8")
+
+
+
+
 @app.route("/api/suggest", methods=["GET"])
 def search_suggest():
     """
