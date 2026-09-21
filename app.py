@@ -639,11 +639,12 @@ def thumbnail():
         img = img.resize((size, size), Image.Resampling.LANCZOS)
 
         # Xử lý màu sắc tự nhiên, không bị chói mắt hay bão hòa gắt
-        # Tăng độ sắc nét sau khi resize để chi tiết và viền ảnh rõ như phác thảo
+        # Giảm nhẹ 8% độ chói để chống cháy sáng/phơi sáng trên màn hình TFT
         from PIL import ImageEnhance, ImageFilter
-        img = ImageEnhance.Contrast(img).enhance(1.08)
-        img = ImageEnhance.Color(img).enhance(0.98) # Màu sắc dịu mắt, hòa vào nền
-        img = img.filter(ImageFilter.SHARPEN)      # Nét viền rõ ràng như phác thảo
+        img = ImageEnhance.Brightness(img).enhance(0.92) # Chống cháy sáng các vùng trắng
+        img = ImageEnhance.Contrast(img).enhance(1.08)   # Độ tương phản sâu
+        img = ImageEnhance.Color(img).enhance(0.92)      # Màu sắc tự nhiên, dịu mắt
+        img = img.filter(ImageFilter.SHARPEN)           # Nét viền rõ ràng như phác thảo
 
         # Chuyển sang RGB565 big-endian với color dithering
         pixels = img.load()
