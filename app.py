@@ -243,22 +243,56 @@ def get_lyrics():
         if len(song_id) == 11:
             lrc_text = _get_youtube_subtitles(song_id)
 
-    # 2. Thử lấy lyric từ LRCLIB nếu chưa có
+    # 2. Thử lấy lyric từ LRCLIB (tìm kiếm mờ hỗ trợ mọi bài Zing/YouTube/V-Pop)
     if not lrc_text and title:
-        try:
-            import urllib.request, urllib.parse
-            clean_t = title.split("(")[0].split("[")[0].split("-")[0].strip()
-            clean_a = artist.split(",")[0].split("&")[0].strip() if artist else ""
-            query_url = f"https://lrclib.net/api/get?track_name={urllib.parse.quote(clean_t)}"
-            if clean_a and clean_a != "Unknown":
-                query_url += f"&artist_name={urllib.parse.quote(clean_a)}"
-            req = urllib.request.Request(query_url, headers={"User-Agent": "ESP32MusicPlayer/2.0"})
-            with urllib.request.urlopen(req, timeout=4) as resp:
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    lrc_text = data.get("syncedLyrics") or ""
-        except Exception:
-            pass
+        import re, urllib.request, urllib.parse
+        # Làm sạch tên bài hát và ca sĩ
+        clean_t = re.sub(r"\[.*?\]|\(.*?\)|Official.*|MV.*|Lyric.*|Audio.*|Video.*|HD.*|4K.*", "", title, flags=re.IGNORECASE)
+        clean_t = clean_t.replace("-", " ").replace("&", " ").strip()
+        clean_t = " ".join(clean_t.split())
+
+        clean_a = ""
+        if artist and artist.lower() not in ("unknown", "zingmp3", "youtube"):
+            clean_a = re.sub(r"\[.*?\]|\(.*?\)", "", artist, flags=re.IGNORECASE)
+            clean_a = clean_a.replace("&", " ").replace(",", " ").strip()
+            clean_a = " ".join(clean_a.split())
+
+        queries = []
+        if clean_a:
+            queries.append(f"{clean_t} {clean_a}")
+        queries.append(clean_t)
+
+        for q in queries:
+            if not q.strip() or lrc_text:
+                break
+            try:
+                query_url = f"https://lrclib.net/api/search?q={urllib.parse.quote(q)}"
+                req = urllib.request.Request(query_url, headers={"User-Agent": "ESP32MusicPlayer/2.0"})
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    if resp.status == 200:
+                        items = json.loads(resp.read().decode("utf-8"))
+                        # Ưu tiên lời khớp thời gian (syncedLyrics)
+                        for it in items:
+                            synced = it.get("syncedLyrics")
+                            if synced and synced.strip():
+                                lrc_text = synced.strip()
+                                break
+                        # Dự phòng lời thường (plainLyrics) được chia nhịp thời gian
+                        if not lrc_text:
+                            for it in items:
+                                plain = it.get("plainLyrics")
+                                if plain and plain.strip():
+                                    plines = [pl.strip() for pl in plain.splitlines() if pl.strip()]
+                                    if plines:
+                                        step_sec = 4.5
+                                        timed_lines = []
+                                        for idx, pline in enumerate(plines):
+                                            sec = int(idx * step_sec)
+                                            timed_lines.append(f"[{sec // 60:02d}:{sec % 60:02d}.00]{pline}")
+                                        lrc_text = "\n".join(timed_lines)
+                                        break
+            except Exception as e:
+                print(f"[Lyrics] Search error for '{q}': {e}")
 
     # 3. Dự phòng giả lập theo đúng tên bài & ca sĩ nếu không tìm thấy lời online
     if not lrc_text.strip():
