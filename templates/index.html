@@ -937,11 +937,122 @@
       pointer-events: none;
       transition: all 0.25s ease;
       z-index: 200;
+    /* XiaoAI Voice Button & Modal */
+    .ai-mic-btn {
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #ff5500, #a855f7);
+      border: none;
+      color: white;
+      font-size: 1.1rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(255, 85, 0, 0.4);
+      transition: all 0.25s ease;
+      flex-shrink: 0;
     }
-    .sc-toast.show {
-      transform: translateY(0);
-      opacity: 1;
+    .ai-mic-btn:hover {
+      transform: scale(1.08);
+      box-shadow: 0 6px 20px rgba(168, 85, 247, 0.6);
     }
+    .ai-mic-btn.listening {
+      animation: pulse-ring 1.2s infinite;
+      background: linear-gradient(135deg, #ef4444, #ff5500);
+    }
+    @keyframes pulse-ring {
+      0% { box-shadow: 0 0 0 0 rgba(255, 85, 0, 0.7); }
+      70% { box-shadow: 0 0 0 16px rgba(255, 85, 0, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(255, 85, 0, 0); }
+    }
+
+    .ai-modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(12px);
+      z-index: 300;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .ai-modal-overlay.show { display: flex; }
+    .ai-modal-card {
+      background: var(--sc-surface-1);
+      border: 1px solid var(--sc-border);
+      border-radius: 24px;
+      width: 100%;
+      max-width: 440px;
+      padding: 32px 24px;
+      text-align: center;
+      position: relative;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.8);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 18px;
+    }
+    .ai-orb {
+      width: 80px;
+      height: 80px;
+      border-radius: 50%;
+      background: radial-gradient(circle at 30% 30%, #ff5500, #a855f7, #06b6d4);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+      font-size: 2rem;
+      box-shadow: 0 0 35px rgba(255, 85, 0, 0.6);
+      animation: orb-spin 3s linear infinite;
+    }
+    @keyframes orb-spin {
+      0% { filter: hue-rotate(0deg); }
+      100% { filter: hue-rotate(360deg); }
+    }
+    .ai-title {
+      font-size: 1.25rem;
+      font-weight: 800;
+      color: var(--sc-text-main);
+    }
+    .ai-status-text {
+      font-size: 0.92rem;
+      color: var(--sc-text-muted);
+      min-height: 24px;
+      line-height: 1.5;
+    }
+    .ai-transcript {
+      background: var(--sc-surface-2);
+      border: 1px solid var(--sc-border);
+      border-radius: 14px;
+      padding: 12px 16px;
+      width: 100%;
+      font-size: 0.95rem;
+      color: #ffaa40;
+      font-weight: 600;
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .ai-tips {
+      font-size: 0.78rem;
+      color: var(--sc-text-dim);
+      line-height: 1.4;
+    }
+    .ai-close-btn {
+      position: absolute;
+      top: 16px;
+      right: 18px;
+      background: transparent;
+      border: none;
+      color: var(--sc-text-dim);
+      font-size: 1.2rem;
+      cursor: pointer;
+    }
+    .ai-close-btn:hover { color: white; }
   </style>
 </head>
 <body>
@@ -957,13 +1068,16 @@
       </div>
     </div>
 
-    <!-- Live Search Box with Autosuggest -->
-    <div class="sc-search-wrap">
-      <div class="sc-search-box">
+    <!-- Live Search Box with Autosuggest + XiaoAI Voice Button -->
+    <div class="sc-search-wrap" style="display:flex; align-items:center; gap:10px;">
+      <div class="sc-search-box" style="flex:1;">
         <i class="fa-solid fa-magnifying-glass sc-search-icon"></i>
         <input type="text" id="searchInput" placeholder="Tìm bài hát, nghệ sĩ, remix, lofi..." autocomplete="off" />
         <i class="fa-solid fa-xmark sc-clear-btn" id="searchClearBtn" onclick="clearSearchInput()"></i>
       </div>
+      <button class="ai-mic-btn" id="aiMicBtn" onclick="toggleVoiceAssistant()" title="Trợ lý giọng nói XiaoAI">
+        <i class="fa-solid fa-microphone"></i>
+      </button>
       <!-- Suggestions dropdown -->
       <div class="sc-suggest-box" id="suggestBox"></div>
     </div>
@@ -1248,6 +1362,24 @@
   <div class="sc-toast" id="toastMsg">
     <i class="fa-solid fa-circle-check" style="color:var(--sc-orange);"></i>
     <span id="toastText">Đã thêm vào danh sách phát tiếp theo!</span>
+  </div>
+
+  <!-- ── XiaoAI Voice Assistant Modal ──────────────────────────── -->
+  <div class="ai-modal-overlay" id="aiModal" onclick="closeVoiceModal(event)">
+    <div class="ai-modal-card" onclick="event.stopPropagation()">
+      <button class="ai-close-btn" onclick="stopVoiceAssistant()"><i class="fa-solid fa-xmark"></i></button>
+      <div class="ai-orb">
+        <i class="fa-solid fa-wand-magic-sparkles"></i>
+      </div>
+      <div class="ai-title">XiaoAI Voice Assistant</div>
+      <div class="ai-status-text" id="aiStatus">Đang lắng nghe giọng nói của bạn...</div>
+      <div class="ai-transcript" id="aiTranscript">"Hãy nói: Mở bài Cắt Đôi Nỗi Sầu..."</div>
+      <div class="ai-tips">
+        💡 <b>Mẫu câu lệnh:</b><br>
+        • "Mở bài Sơn Tùng M-TP" • "Bật nhạc remix TikTok"<br>
+        • "Tăng âm lượng" • "Chuyển bài tiếp theo" • "Tạm dừng"
+      </div>
+    </div>
   </div>
 
   <!-- ── JavaScript Application Logic ────────────────────────────── -->
@@ -2106,8 +2238,127 @@
       }
     }, 1000);
 
-    // Chu kỳ poll status mỗi 1.5 giây
-    setInterval(pollStatus, 1500);
+    // ─── XiaoAI Voice Assistant (Web Speech API) ────────────────
+    let voiceRecognition = null;
+    let isListening = false;
+
+    function initVoiceAssistant() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        return null;
+      }
+      const recog = new SpeechRecognition();
+      recog.lang = 'vi-VN';
+      recog.continuous = false;
+      recog.interimResults = true;
+
+      recog.onstart = () => {
+        isListening = true;
+        document.getElementById('aiMicBtn').classList.add('listening');
+        document.getElementById('aiModal').classList.add('show');
+        document.getElementById('aiStatus').textContent = 'Đang lắng nghe giọng nói của bạn...';
+        document.getElementById('aiTranscript').textContent = 'Đang thu âm...';
+      };
+
+      recog.onresult = (e) => {
+        let transcript = '';
+        for (let i = e.resultIndex; i < e.results.length; i++) {
+          transcript += e.results[i][0].transcript;
+        }
+        document.getElementById('aiTranscript').textContent = `"${transcript}"`;
+        if (e.results[e.results.length - 1].isFinal) {
+          handleVoiceCommand(transcript);
+        }
+      };
+
+      recog.onerror = (e) => {
+        console.warn('Voice error:', e);
+        document.getElementById('aiStatus').textContent = 'Không nhận diện được âm thanh hoặc đã hủy.';
+        setTimeout(stopVoiceAssistant, 1800);
+      };
+
+      recog.onend = () => {
+        isListening = false;
+        document.getElementById('aiMicBtn').classList.remove('listening');
+      };
+
+      return recog;
+    }
+
+    function toggleVoiceAssistant() {
+      if (!voiceRecognition) {
+        voiceRecognition = initVoiceAssistant();
+      }
+      if (!voiceRecognition) {
+        alert('Trình duyệt của bạn chưa hỗ trợ Web Speech API. Hãy dùng Google Chrome hoặc Microsoft Edge trên máy tính / điện thoại Android nhé!');
+        return;
+      }
+      if (isListening) {
+        stopVoiceAssistant();
+      } else {
+        try {
+          voiceRecognition.start();
+        } catch (err) {
+          console.error(err);
+        }
+      }
+    }
+
+    function stopVoiceAssistant() {
+      if (voiceRecognition && isListening) {
+        voiceRecognition.stop();
+      }
+      isListening = false;
+      document.getElementById('aiMicBtn').classList.remove('listening');
+      document.getElementById('aiModal').classList.remove('show');
+    }
+
+    function closeVoiceModal(e) {
+      if (e.target.id === 'aiModal') {
+        stopVoiceAssistant();
+      }
+    }
+
+    async function handleVoiceCommand(commandText) {
+      if (!commandText || !commandText.trim()) return;
+      document.getElementById('aiStatus').innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> XiaoAI đang phân tích và xử lý...';
+
+      try {
+        const res = await fetch('/api/ai/voice_command', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ command: commandText })
+        });
+        const data = await res.json();
+
+        if (data.status === 'ok') {
+          document.getElementById('aiStatus').textContent = '✅ Đã thực hiện thành công!';
+          document.getElementById('aiTranscript').textContent = data.message;
+          showToast(data.message);
+
+          if (data.action === 'play' && data.song) {
+            updateNowPlayingUI(data.song, true);
+            loadHistory();
+            loadQueue();
+          }
+
+          // Phản hồi giọng nói tiếng Việt qua loa điện thoại
+          if ('speechSynthesis' in window) {
+            const utter = new SpeechSynthesisUtterance(data.message.replace('XiaoAI: ', ''));
+            utter.lang = 'vi-VN';
+            window.speechSynthesis.speak(utter);
+          }
+
+          setTimeout(stopVoiceAssistant, 2200);
+        } else {
+          document.getElementById('aiStatus').textContent = '⚠️ ' + (data.message || 'Không tìm thấy kết quả.');
+          setTimeout(stopVoiceAssistant, 2500);
+        }
+      } catch (err) {
+        document.getElementById('aiStatus').textContent = 'Lỗi kết nối tới Server: ' + err.message;
+        setTimeout(stopVoiceAssistant, 2500);
+      }
+    }
 
     // ─── Helpers ──────────────────────────────────────────────
     function escapeQuotes(str) {

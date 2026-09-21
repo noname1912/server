@@ -1133,6 +1133,160 @@ def player_report():
     return jsonify({"status": "ok"})
 
 
+# ─── XiaoAI Voice Assistant API ───────────────────────────────
+
+@app.route("/api/ai/voice_command", methods=["POST"])
+def ai_voice_command():
+    """
+    Trợ lý giọng nói AI (XiaoAI / Xiaomi Voice Assistant):
+    POST /api/ai/voice_command
+    Body JSON: {"command": "mở bài Cắt Đôi Nỗi Sầu"}
+    """
+    data = request.get_json(force=True, silent=True) or {}
+    cmd = (data.get("command") or data.get("text") or "").strip().lower()
+
+    if not cmd:
+        return jsonify({"status": "error", "message": "Không nghe rõ câu lệnh, vui lòng thử lại!"}), 400
+
+    print(f"[XiaoAI] Nhan lenh giong noi: '{cmd}'")
+
+    # 1. Nhan dien cac lenh dieu khien nhanh
+    if any(w in cmd for w in ["tiếp theo", "bài tiếp", "qua bài", "next"]):
+        with _player_lock:
+            ok = _auto_play_next()
+        if ok:
+            return jsonify({
+                "status": "ok",
+                "action": "next",
+                "message": f"XiaoAI: Đã chuyển bài tiếp theo '{_player_state['song'].get('title')}'",
+                "song": _player_state["song"]
+            })
+        return jsonify({"status": "ok", "action": "next", "message": "Hàng đợi trống, không có bài tiếp theo."})
+
+    if any(w in cmd for w in ["dừng lại", "tạm dừng", "pause", "tắt nhạc", "im lặng", "stop"]):
+        with _player_lock:
+            _player_state["state"] = "paused"
+            _player_state["seq"] = int(time.time() * 1000) % 2000000000
+        return jsonify({"status": "ok", "action": "pause", "message": "XiaoAI: Đã tạm dừng phát nhạc."})
+
+    if any(w in cmd for w in ["tiếp tục", "phát tiếp", "resume", "bật lại"]):
+        with _player_lock:
+            _player_state["state"] = "playing"
+            _player_state["seq"] = int(time.time() * 1000) % 2000000000
+        return jsonify({"status": "ok", "action": "resume", "message": "XiaoAI: Tiếp tục phát nhạc."})
+
+    if any(w in cmd for w in ["tăng âm lượng", "to lên", "bật to", "âm lượng to", "cho to"]):
+        with _player_lock:
+            _player_state["volume"] = min(21, _player_state.get("volume", 11) + 2)
+        return jsonify({"status": "ok", "action": "volume", "volume": _player_state["volume"], "message": f"XiaoAI: Đã tăng âm lượng lên {_player_state['volume']}/21."})
+
+    if any(w in cmd for w in ["giảm âm lượng", "nhỏ lại", "bật nhỏ", "âm lượng nhỏ", "cho nhỏ"]):
+        with _player_lock:
+            _player_state["volume"] = max(0, _player_state.get("volume", 11) - 2)
+        return jsonify({"status": "ok", "action": "volume", "volume": _player_state["volume"], "message": f"XiaoAI: Đã giảm âm lượng xuống {_player_state['volume']}/21."})
+
+    # 2. Xử lý yêu cầu tìm & phát bài hát
+    prefixes = [
+        "mở bài hát", "mở ca khúc", "mở bản nhạc", "mở bài", "mở nhạc", "mở",
+        "phát bài hát", "phát ca khúc", "phát bản nhạc", "phát bài", "phát nhạc", "phát",
+        "bật bài hát", "bật ca khúc", "bật bản nhạc", "bật bài", "bật nhạc", "bật",
+        "tìm bài hát", "tìm ca khúc", "tìm bài", "tìm kiếm", "tìm",
+        "cho tôi nghe bài", "cho nghe bài", "nghe bài", "nghe",
+        "hát bài", "chơi bài", "play"
+    ]
+    query = cmd
+    for p in prefixes:
+        if query.startswith(p + " "):
+            query = query[len(p)+1:].strip()
+            break
+        elif query.startswith(p):
+            query = query[len(p):].strip()
+            break
+
+    if not query:
+        query = cmd
+
+    print(f"[XiaoAI] Trich xuat tu khoa: '{query}'")
+
+    found_songs = []
+    # Thử ZingMP3 trước
+    try:
+        if "zing" in PLATFORMS:
+            res_z = PLATFORMS["zing"].search(query, limit=5)
+            if res_z:
+                found_songs.extend(res_z)
+    except Exception as ex_z:
+        print(f"[XiaoAI] Zing error: {ex_z}")
+
+    # Thử YouTube nếu cần
+    if len(found_songs) < 2:
+        try:
+            if "youtube" in PLATFORMS:
+                res_yt = PLATFORMS["youtube"].search(query, limit=5)
+                if res_yt:
+                    found_songs.extend(res_yt)
+        except Exception as ex_yt:
+            print(f"[XiaoAI] YT error: {ex_yt}")
+
+    # Thử SoundCloud nếu vẫn chưa có
+    if not found_songs:
+        try:
+            if "soundcloud" in PLATFORMS:
+                res_sc = PLATFORMS["soundcloud"].search(query, limit=5)
+                if res_sc:
+                    found_songs.extend(res_sc)
+        except Exception as ex_sc:
+            print(f"[XiaoAI] SC error: {ex_sc}")
+
+    if not found_songs:
+        return jsonify({
+            "status": "not_found",
+            "action": "search",
+            "message": f"XiaoAI: Không tìm thấy bài hát nào cho '{query}'. Bạn thử nói bài khác nhé!"
+        })
+
+    best_song = found_songs[0]
+    platform = str(best_song.get("platform", "youtube")).lower()
+    song_id  = str(best_song.get("id", "")).strip()
+
+    if song_id.startswith("http"):
+        import base64
+        safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
+    else:
+        safe_id = song_id
+
+    with _player_lock:
+        global _playlist, _playlist_idx
+        _player_state["seq"] = int(time.time() * 1000) % 2000000000
+        _player_state["state"] = "playing"
+        _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
+        _player_state["song"] = best_song
+        _player_state["elapsed"] = 0
+
+        for i, s in enumerate(_playlist):
+            if str(s.get("id")) == song_id:
+                _playlist_idx = i
+                break
+        else:
+            _playlist.insert(_playlist_idx + 1, best_song)
+            _playlist_idx = _playlist_idx + 1
+
+    try:
+        db.add_play_history(best_song)
+    except Exception:
+        pass
+
+    msg = f"XiaoAI: Đang phát bài '{best_song.get('title')}' của {best_song.get('artist', 'Unknown')} lên Loa ESP32"
+    print(f"[XiaoAI] {msg}")
+
+    return jsonify({
+        "status": "ok",
+        "action": "play",
+        "message": msg,
+        "song": best_song
+    })
+
+
 # ─── Health check ──────────────────────────────────────────────
 
 
