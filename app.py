@@ -253,10 +253,24 @@ def get_lyrics():
             clean_a = clean_a.replace("&", " ").replace(",", " ").strip()
             clean_a = " ".join(clean_a.split())
 
+        def _strip_vn(s: str) -> str:
+            import unicodedata
+            s = unicodedata.normalize('NFD', s)
+            s = ''.join(c for c in s if unicodedata.category(c) != 'Mn')
+            s = s.replace('đ', 'd').replace('Đ', 'D')
+            return s
+
+        clean_a_unacc = _strip_vn(clean_a) if clean_a else ""
+        clean_t_unacc = _strip_vn(clean_t)
+
         queries = []
         if clean_a:
             queries.append(f"{clean_t} {clean_a}")
         queries.append(clean_t)
+        if clean_t_unacc != clean_t:
+            if clean_a_unacc:
+                queries.append(f"{clean_t_unacc} {clean_a_unacc}")
+            queries.append(clean_t_unacc)
 
         for q in queries:
             if not q.strip() or lrc_text:
@@ -264,7 +278,7 @@ def get_lyrics():
             try:
                 query_url = f"https://lrclib.net/api/search?q={urllib.parse.quote(q)}"
                 req = urllib.request.Request(query_url, headers={"User-Agent": "ESP32MusicPlayer/2.0"})
-                with urllib.request.urlopen(req, timeout=3) as resp:
+                with urllib.request.urlopen(req, timeout=2.5) as resp:
                     if resp.status == 200:
                         items = json.loads(resp.read().decode("utf-8"))
                         # Ưu tiên lời khớp thời gian (syncedLyrics)
@@ -283,8 +297,8 @@ def get_lyrics():
                                         step_sec = 4.5
                                         timed_lines = []
                                         for idx, pline in enumerate(plines):
-                                            sec = int(idx * step_sec)
-                                            timed_lines.append(f"[{sec // 60:02d}:{sec % 60:02d}.00]{pline}")
+                                             sec = int(idx * step_sec)
+                                             timed_lines.append(f"[{sec // 60:02d}:{sec % 60:02d}.00]{pline}")
                                         lrc_text = "\n".join(timed_lines)
                                         break
             except Exception as e:
@@ -621,13 +635,15 @@ def thumbnail():
         top = (h - min_dim) // 2
         img = img.crop((left, top, left + min_dim, top + min_dim))
 
-        # Tăng nhẹ độ tương phản & độ nét để nổi bật trên màn hình TFT 2.8"
-        from PIL import ImageEnhance, ImageFilter
-        img = ImageEnhance.Contrast(img).enhance(1.15)
-        img = ImageEnhance.Color(img).enhance(1.1)
-        img = img.filter(ImageFilter.UnsharpMask(radius=1.5, percent=120, threshold=3))
-
+        # Resize về đúng độ phân giải bằng LANCZOS trước để ảnh mịn và không méo
         img = img.resize((size, size), Image.Resampling.LANCZOS)
+
+        # Xử lý màu sắc tự nhiên, không bị chói mắt hay bão hòa gắt
+        # Tăng độ sắc nét sau khi resize để chi tiết và viền ảnh rõ như phác thảo
+        from PIL import ImageEnhance, ImageFilter
+        img = ImageEnhance.Contrast(img).enhance(1.08)
+        img = ImageEnhance.Color(img).enhance(0.98) # Màu sắc dịu mắt, hòa vào nền
+        img = img.filter(ImageFilter.SHARPEN)      # Nét viền rõ ràng như phác thảo
 
         # Chuyển sang RGB565 big-endian với color dithering
         pixels = img.load()
