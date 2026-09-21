@@ -238,13 +238,9 @@ def get_lyrics():
             pass
 
     lrc_text = ""
-    # 1. Trích xuất từ YouTube video nếu có ID 11 ký tự
-    if len(song_id) == 11 or platform in ("youtube", "zing"):
-        if len(song_id) == 11:
-            lrc_text = _get_youtube_subtitles(song_id)
 
-    # 2. Thử lấy lyric từ LRCLIB (tìm kiếm mờ hỗ trợ mọi bài Zing/YouTube/V-Pop)
-    if not lrc_text and title:
+    # 1. Thử lấy lyric từ LRCLIB TRƯỚC (cực nhanh 0.2s - 0.5s, hỗ trợ trọn vẹn nhạc Việt Zing/YouTube/V-Pop)
+    if title:
         import re, urllib.request, urllib.parse
         # Làm sạch tên bài hát và ca sĩ
         clean_t = re.sub(r"\[.*?\]|\(.*?\)|Official.*|MV.*|Lyric.*|Audio.*|Video.*|HD.*|4K.*", "", title, flags=re.IGNORECASE)
@@ -268,7 +264,7 @@ def get_lyrics():
             try:
                 query_url = f"https://lrclib.net/api/search?q={urllib.parse.quote(q)}"
                 req = urllib.request.Request(query_url, headers={"User-Agent": "ESP32MusicPlayer/2.0"})
-                with urllib.request.urlopen(req, timeout=5) as resp:
+                with urllib.request.urlopen(req, timeout=3) as resp:
                     if resp.status == 200:
                         items = json.loads(resp.read().decode("utf-8"))
                         # Ưu tiên lời khớp thời gian (syncedLyrics)
@@ -292,7 +288,11 @@ def get_lyrics():
                                         lrc_text = "\n".join(timed_lines)
                                         break
             except Exception as e:
-                print(f"[Lyrics] Search error for '{q}': {e}")
+                print(f"[Lyrics] LRCLIB search error for '{q}': {e}")
+
+    # 2. Nếu chưa có trên LRCLIB, thử trích xuất phụ đề YouTube (chỉ khi có video_id)
+    if not lrc_text and len(song_id) == 11:
+        lrc_text = _get_youtube_subtitles(song_id)
 
     # 3. Dự phòng giả lập theo đúng tên bài & ca sĩ nếu không tìm thấy lời online
     if not lrc_text.strip():
