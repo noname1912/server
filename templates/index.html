@@ -2206,6 +2206,12 @@
         if (!res.ok) return;
         const data = await res.json();
 
+        // Cập nhật trạng thái khóa Web Remote từ ESP32
+        const lockOverlay = document.getElementById('remoteLockOverlay');
+        if (lockOverlay) {
+          lockOverlay.style.display = data.remote_locked ? 'flex' : 'none';
+        }
+
         // Cập nhật trạng thái nguồn (Bật/Tắt)
         if (data.power) {
           updatePowerUI(data.power);
@@ -2430,5 +2436,21 @@
       pollStatus();
     });
   </script>
+
+  <!-- Lock Screen Overlay khi Web Remote bị tắt từ ESP32 -->
+  <div id="remoteLockOverlay" style="display:none; position:fixed; inset:0; background:rgba(8, 8, 24, 0.96); backdrop-filter:blur(18px); z-index:99999; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:24px;">
+    <div style="width:84px; height:84px; border-radius:50%; background:rgba(239, 68, 68, 0.15); border:2px solid #ef4444; display:flex; align-items:center; justify-content:center; margin-bottom:20px; box-shadow: 0 0 35px rgba(239, 68, 68, 0.35);">
+      <i class="fa-solid fa-lock" style="font-size:38px; color:#ef4444;"></i>
+    </div>
+    <h2 style="font-size:1.6rem; font-weight:800; color:#ffffff; margin-bottom:12px; letter-spacing:-0.5px;">Web Remote Đang Bị Khóa</h2>
+    <p style="color:#94a3b8; max-width:400px; font-size:0.95rem; line-height:1.6; margin-bottom:24px;">
+      Tính năng điều khiển từ xa qua điện thoại đã bị <b style="color:#f87171;">TẮT trực tiếp trên màn hình ESP32</b>.<br><br>
+      Để mở khóa, vui lòng vào màn hình ESP32:<br>
+      <b>Cài Đặt &rarr; Web Remote &rarr; BẬT</b>
+    </p>
+    <div style="font-size:0.82rem; color:#64748b; background:rgba(255,255,255,0.05); padding:10px 20px; border-radius:30px; border:1px solid rgba(255,255,255,0.1);">
+      <i class="fa-solid fa-rotate fa-spin" style="margin-right:8px; color:#38bdf8;"></i>Tự động mở khóa khi bật lại trên ESP32...
+    </div>
+  </div>
 </body>
 </html>

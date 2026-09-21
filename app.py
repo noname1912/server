@@ -731,6 +731,7 @@ _playlist: list[dict] = []
 _playlist_idx: int = 0
 _player_state = {
     "power": "on",           # "on" (Bật hoạt động), "off" (Tắt / Chế độ ngủ)
+    "remote_locked": False,  # True = Đã bị khóa từ màn hình ESP32
     "state": "stopped",      # "playing", "paused", "stopped"
     "seq": int(time.time()), # Dùng timestamp để luôn tăng và không bao giờ bị trùng
     "song": None,            # Thông tin SongInfo hiện tại
@@ -804,6 +805,9 @@ def player_play():
     if not song_id:
         return jsonify({"error": "Missing song_id"}), 400
 
+    if _player_state.get("remote_locked", False):
+        return jsonify({"error": "Web Remote đã bị khóa từ thiết bị ESP32"}), 403
+
     # Lấy stream url an toàn cho ESP32 Audio parser
     if song_id.startswith("http"):
         import base64
@@ -873,6 +877,9 @@ def player_control():
     """
     data   = request.get_json(force=True, silent=True) or {}
     action = str(data.get("action", "")).lower()
+
+    if _player_state.get("remote_locked", False):
+        return jsonify({"error": "Web Remote đã bị khóa từ thiết bị ESP32"}), 403
 
     with _player_lock:
         global _playlist, _playlist_idx
@@ -1078,6 +1085,7 @@ def player_status():
         resp = {
             "status": "ok",
             "power": _player_state.get("power", "on"),
+            "remote_locked": _player_state.get("remote_locked", False),
             "state": _player_state["state"],
             "seq": _player_state["seq"],
             "stream_url": url,
@@ -1086,6 +1094,27 @@ def player_status():
             "song": _player_state["song"],
         }
     return jsonify(resp)
+
+
+@app.route("/api/player/remote_lock", methods=["GET", "POST"])
+def player_remote_lock():
+    """
+    ESP32 gửi lệnh Khóa / Mở khóa Web Remote:
+    POST /api/player/remote_lock
+    Body: {"locked": true | false}
+    """
+    with _player_lock:
+        if request.method == "POST":
+            data = request.get_json(force=True, silent=True) or {}
+            locked = data.get("locked")
+            if locked is not None:
+                _player_state["remote_locked"] = bool(locked)
+                _player_state["seq"] = int(time.time() * 1000) % 2000000000
+                print(f"[WebRemote] >>> TRANG THAI KHOA (REMOTE LOCKED): {_player_state['remote_locked']}")
+        return jsonify({
+            "status": "ok",
+            "locked": _player_state.get("remote_locked", False)
+        })
 
 
 @app.route("/api/player/power", methods=["GET", "POST"])
@@ -1179,6 +1208,9 @@ def ai_voice_command():
 
     if not cmd:
         return jsonify({"status": "error", "message": "Không nghe rõ câu lệnh, vui lòng thử lại!"}), 400
+
+    if _player_state.get("remote_locked", False):
+        return jsonify({"status": "error", "message": "XiaoAI: Web Remote đang bị KHÓA từ màn hình ESP32. Hãy bật lại trên ESP32 để sử dụng!"}), 403
 
     print(f"[XiaoAI] Nhan lenh giong noi: '{cmd}'")
 
