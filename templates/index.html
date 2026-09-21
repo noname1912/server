@@ -1083,7 +1083,13 @@
     </div>
 
     <!-- Header Actions -->
-    <div class="sc-header-actions">
+    <div class="sc-header-actions" style="display:flex; align-items:center; gap:10px;">
+      <!-- Power Switch Button -->
+      <button class="btn-sc-outline" id="powerBtn" onclick="togglePower()" title="Bật / Tắt nguồn thiết bị ESP32" style="gap:6px; padding:8px 14px; border-color: rgba(16, 185, 129, 0.4); background: rgba(16, 185, 129, 0.1);">
+        <i class="fa-solid fa-power-off" id="powerIcon" style="color:#10b981;"></i>
+        <span id="powerText" style="font-size:0.85rem; font-weight:700;">Bật</span>
+      </button>
+
       <div class="speaker-pill" id="speakerStatusPill" title="Trạng thái kết nối Loa ESP32">
         <div class="speaker-dot"></div>
         <span id="speakerStatusText">ESP32 Loa</span>
@@ -2200,9 +2206,18 @@
         if (!res.ok) return;
         const data = await res.json();
 
+        // Cập nhật trạng thái nguồn (Bật/Tắt)
+        if (data.power) {
+          updatePowerUI(data.power);
+        }
+
         // Cập nhật Loa ESP32 status
         const pillText = document.getElementById('speakerStatusText');
-        pillText.textContent = data.state === 'playing' ? 'Loa: Đang phát' : 'Loa: Sẵn sàng';
+        if (data.power === 'off') {
+          pillText.textContent = 'Loa: Đang ngủ';
+        } else {
+          pillText.textContent = data.state === 'playing' ? 'Loa: Đang phát' : 'Loa: Sẵn sàng';
+        }
 
         // Cập nhật volume slider nếu lệch
         if (data.volume !== undefined && !isMuted) {
@@ -2226,6 +2241,43 @@
         }
       } catch (err) {
         document.getElementById('speakerStatusText').textContent = 'Loa: Ngoại tuyến';
+      }
+    }
+
+    // ─── Power Management (Bật / Tắt Thiết Bị Từ Xa) ───────────
+    let isPowerOn = true;
+
+    async function togglePower() {
+      try {
+        const res = await fetch('/api/player/power', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ state: 'toggle' })
+        });
+        const data = await res.json();
+        updatePowerUI(data.power);
+        showToast(data.power === 'on' ? 'Đã bật thiết bị ESP32' : 'Đã tắt thiết bị (Chế độ ngủ)');
+      } catch (err) {
+        console.error('Power toggle error:', err);
+      }
+    }
+
+    function updatePowerUI(powerState) {
+      isPowerOn = (powerState === 'on');
+      const btn = document.getElementById('powerBtn');
+      const icon = document.getElementById('powerIcon');
+      const text = document.getElementById('powerText');
+      if (!btn || !icon || !text) return;
+      if (isPowerOn) {
+        icon.style.color = '#10b981';
+        text.textContent = 'Bật';
+        btn.style.borderColor = 'rgba(16, 185, 129, 0.4)';
+        btn.style.background = 'rgba(16, 185, 129, 0.1)';
+      } else {
+        icon.style.color = '#ef4444';
+        text.textContent = 'Tắt';
+        btn.style.borderColor = 'rgba(239, 68, 68, 0.4)';
+        btn.style.background = 'rgba(239, 68, 68, 0.1)';
       }
     }
 

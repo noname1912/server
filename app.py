@@ -730,6 +730,7 @@ _player_lock = threading.Lock()
 _playlist: list[dict] = []
 _playlist_idx: int = 0
 _player_state = {
+    "power": "on",           # "on" (Bật hoạt động), "off" (Tắt / Chế độ ngủ)
     "state": "stopped",      # "playing", "paused", "stopped"
     "seq": int(time.time()), # Dùng timestamp để luôn tăng và không bao giờ bị trùng
     "song": None,            # Thông tin SongInfo hiện tại
@@ -1076,6 +1077,7 @@ def player_status():
 
         resp = {
             "status": "ok",
+            "power": _player_state.get("power", "on"),
             "state": _player_state["state"],
             "seq": _player_state["seq"],
             "stream_url": url,
@@ -1084,6 +1086,36 @@ def player_status():
             "song": _player_state["song"],
         }
     return jsonify(resp)
+
+
+@app.route("/api/player/power", methods=["GET", "POST"])
+def player_power():
+    """
+    Bật / Tắt nguồn hoặc Chế độ ngủ (Standby) từ xa:
+    POST /api/player/power
+    Body JSON: {"state": "on" | "off" | "toggle"}
+    """
+    with _player_lock:
+        if request.method == "POST":
+            data = request.get_json(force=True, silent=True) or {}
+            target = str(data.get("state", "toggle")).lower()
+            if target == "toggle":
+                _player_state["power"] = "off" if _player_state.get("power", "on") == "on" else "on"
+            elif target in ["on", "off"]:
+                _player_state["power"] = target
+
+            if _player_state["power"] == "off":
+                _player_state["state"] = "stopped"
+                _player_state["stream_url"] = ""
+
+            _player_state["seq"] = int(time.time() * 1000) % 2000000000
+            print(f"[PlayerHub] >>> NGUON THIET BI (POWER): {_player_state['power'].upper()}")
+
+        return jsonify({
+            "status": "ok",
+            "power": _player_state.get("power", "on"),
+            "state": _player_state["state"]
+        })
 
 
 @app.route("/api/player/report", methods=["POST"])
@@ -1151,6 +1183,20 @@ def ai_voice_command():
     print(f"[XiaoAI] Nhan lenh giong noi: '{cmd}'")
 
     # 1. Nhan dien cac lenh dieu khien nhanh
+    if any(w in cmd for w in ["tắt máy", "tắt loa", "tắt nguồn", "đi ngủ", "sleep", "ngủ đi"]):
+        with _player_lock:
+            _player_state["power"] = "off"
+            _player_state["state"] = "stopped"
+            _player_state["stream_url"] = ""
+            _player_state["seq"] = int(time.time() * 1000) % 2000000000
+        return jsonify({"status": "ok", "action": "power", "power": "off", "message": "XiaoAI: Đã tắt máy và chuyển sang chế độ ngủ."})
+
+    if any(w in cmd for w in ["bật máy", "bật loa", "mở máy", "bật nguồn", "thức dậy", "wake up"]):
+        with _player_lock:
+            _player_state["power"] = "on"
+            _player_state["seq"] = int(time.time() * 1000) % 2000000000
+        return jsonify({"status": "ok", "action": "power", "power": "on", "message": "XiaoAI: Đã bật máy và sẵn sàng hoạt động!"})
+
     if any(w in cmd for w in ["tiếp theo", "bài tiếp", "qua bài", "next"]):
         with _player_lock:
             ok = _auto_play_next()
