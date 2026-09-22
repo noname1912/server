@@ -35,33 +35,6 @@ _cache_lock = threading.Lock()
 
 @app.route("/")
 def index():
-    if _player_state.get("remote_locked", False):
-        return """
-        <!DOCTYPE html>
-        <html lang="vi">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>403 - Đã Khóa Web Remote</title>
-            <style>
-                body { background: #080818; color: #fff; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; text-align: center; }
-                .card { background: #101030; padding: 36px 28px; border-radius: 20px; border: 2px solid #ef4444; max-width: 420px; box-shadow: 0 0 40px rgba(239, 68, 68, 0.25); }
-                .icon { font-size: 54px; margin-bottom: 16px; }
-                h1 { color: #ffffff; font-size: 1.5rem; margin: 0 0 12px; }
-                p { color: #94a3b8; line-height: 1.6; font-size: 0.95rem; margin: 0 0 20px; }
-                .badge { background: rgba(239, 68, 68, 0.15); color: #f87171; padding: 6px 14px; border-radius: 30px; font-weight: 600; font-size: 0.85rem; display: inline-block; }
-            </style>
-        </head>
-        <body>
-            <div class="card">
-                <div class="icon">🔒</div>
-                <h1>Web Remote Đang Bị Khóa</h1>
-                <p>Tính năng điều khiển qua trình duyệt đã được <b>TẮT trực tiếp trên màn hình ESP32</b>.<br><br>Để truy cập lại, vui lòng vào màn hình ESP32:<br><b style="color:#38bdf8;">Cài Đặt &rarr; Web Remote &rarr; BẬT</b></p>
-                <div class="badge">🚫 TRUY CẬP ĐÃ BỊ NGẮT</div>
-            </div>
-        </body>
-        </html>
-        """, 403
     return render_template("index.html")
 
 
