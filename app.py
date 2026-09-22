@@ -539,13 +539,13 @@ def stream_audio(platform: str, song_id: str):
             threading.Thread(target=_watch_transcode, daemon=True).start()
 
     # 3. STREAM PROGRESSIVE: Đọc từ file tmp_mp3 đang lớn dần
-    # Chờ file có ít nhất 16KB dữ liệu ban đầu (~1 giây nhạc)
+    # Chờ file có ít nhất 48KB dữ liệu ban đầu (~3.5 giây nhạc) để chống giật âm thanh
     t_wait = time.time()
-    while not tmp_mp3.exists() or tmp_mp3.stat().st_size < 16384:
+    while not tmp_mp3.exists() or tmp_mp3.stat().st_size < 49152:
         if proc.poll() is not None and (not tmp_mp3.exists() or tmp_mp3.stat().st_size == 0):
             print("[Stream] FFmpeg khởi động thất bại!")
             abort(502, "Transcode startup failed")
-        time.sleep(0.04)
+        time.sleep(0.03)
         if time.time() - t_wait > 6:
             break
 
@@ -554,7 +554,7 @@ def stream_audio(platform: str, song_id: str):
         try:
             with open(curr_file, "rb") as f:
                 while True:
-                    chunk = f.read(4096)
+                    chunk = f.read(8192)
                     if chunk:
                         yield chunk
                     else:
@@ -564,7 +564,7 @@ def stream_audio(platform: str, song_id: str):
                             if rem:
                                 yield rem
                             break
-                        time.sleep(0.04)
+                        time.sleep(0.02)
         except Exception:
             # Client ngắt kết nối
             pass
