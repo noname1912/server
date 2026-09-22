@@ -11,8 +11,14 @@
   <meta name="apple-mobile-web-app-title" content="ESP32 Hi-Fi" />
   <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
   <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png" />
-  <link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png" />
-  <link rel="manifest" href="/static/manifest.json" />
+  <script>
+    if (location.protocol === 'https:') {
+      const m = document.createElement('link');
+      m.rel = 'manifest';
+      m.href = '/static/manifest.json';
+      document.head.appendChild(m);
+    }
+  </script>
   <meta name="theme-color" content="#0e0e12" />
 
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -2467,8 +2473,8 @@
       }, 1500);
     }
 
-    // Register Service Worker
-    if ('serviceWorker' in navigator) {
+    // Register Service Worker (Chỉ kích hoạt khi chạy HTTPS để tránh iOS ép HTTPS-only trên HTTP)
+    if (location.protocol === 'https:' && 'serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('/static/sw.js').catch(() => {});
       });
