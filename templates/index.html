@@ -2,25 +2,8 @@
 <html lang="vi">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
   <title>SoundCloud ESP32 — Hi-Fi Music Hub</title>
-
-  <!-- iOS PWA Standalone App Config -->
-  <meta name="apple-mobile-web-app-capable" content="yes" />
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <meta name="apple-mobile-web-app-title" content="ESP32 Hi-Fi" />
-  <link rel="apple-touch-icon" href="/static/apple-touch-icon.png" />
-  <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png" />
-  <script>
-    if (location.protocol === 'https:') {
-      const m = document.createElement('link');
-      m.rel = 'manifest';
-      m.href = '/static/manifest.json';
-      document.head.appendChild(m);
-    }
-  </script>
-  <meta name="theme-color" content="#0e0e12" />
-
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
@@ -54,8 +37,7 @@
       color: var(--sc-text-main);
       min-height: 100vh;
       overflow-x: hidden;
-      padding-top: env(safe-area-inset-top);
-      padding-bottom: calc(var(--player-h) + 20px + env(safe-area-inset-bottom));
+      padding-bottom: calc(var(--player-h) + 20px);
     }
 
     /* Scrollbar */
@@ -2444,42 +2426,6 @@
       return JSON.stringify(obj).replace(/"/g, '&quot;');
     }
 
-    // ─── PWA & iOS Haptic & Install Banner ────────────────────
-    function triggerHaptic() {
-      if ('vibrate' in navigator) {
-        try { navigator.vibrate(12); } catch (e) {}
-      }
-    }
-    document.addEventListener('click', (e) => {
-      if (e.target.closest('button, .sc-btn, .sc-track-item, .sc-tab, .sc-theme-card, .sc-eq-btn')) {
-        triggerHaptic();
-      }
-    });
-
-    function dismissIosInstall() {
-      const el = document.getElementById('iosInstallBanner');
-      if (el) el.style.display = 'none';
-      sessionStorage.setItem('ios_pwa_dismissed', '1');
-    }
-
-    // Check if iOS Safari and not in standalone mode
-    const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
-    const isStandalone = window.navigator.standalone === true || window.matchMedia('(display-mode: standalone)').matches;
-
-    if (isIos && !isStandalone && !sessionStorage.getItem('ios_pwa_dismissed')) {
-      setTimeout(() => {
-        const el = document.getElementById('iosInstallBanner');
-        if (el) el.style.display = 'flex';
-      }, 1500);
-    }
-
-    // Register Service Worker (Chỉ kích hoạt khi chạy HTTPS để tránh iOS ép HTTPS-only trên HTTP)
-    if (location.protocol === 'https:' && 'serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/static/sw.js').catch(() => {});
-      });
-    }
-
     // ─── App Bootstrap ────────────────────────────────────────
     window.addEventListener('DOMContentLoaded', async () => {
       initWaveform();
@@ -2490,18 +2436,6 @@
       pollStatus();
     });
   </script>
-
-  <!-- iOS PWA Install Banner (Hien tren iPhone/iPad Safari khi chua cai) -->
-  <div id="iosInstallBanner" style="display:none; position:fixed; bottom:calc(var(--player-h) + 18px); left:16px; right:16px; max-width:440px; margin:0 auto; background:rgba(22, 22, 32, 0.96); backdrop-filter:blur(24px); border:1px solid rgba(255, 85, 0, 0.45); border-radius:18px; padding:12px 16px; z-index:9998; box-shadow:0 12px 36px rgba(0,0,0,0.7); align-items:center; gap:12px;">
-    <img src="/static/apple-touch-icon.png" style="width:44px; height:44px; border-radius:11px; flex-shrink:0; box-shadow:0 4px 12px rgba(255,85,0,0.35);" />
-    <div style="flex:1;">
-      <div style="font-weight:700; font-size:0.9rem; color:#fff;">Cài đặt App vào iPhone</div>
-      <div style="font-size:0.75rem; color:#94a3b8; line-height:1.35; margin-top:2px;">
-        Bấm nút Chia sẻ <i class="fa-solid fa-arrow-up-from-bracket" style="color:#ff5500; margin:0 2px;"></i> rồi chọn <b>"Thêm vào MH chính"</b> để mở full màn hình!
-      </div>
-    </div>
-    <button onclick="dismissIosInstall()" style="background:transparent; border:none; color:#64748b; font-size:18px; padding:6px; cursor:pointer;"><i class="fa-solid fa-xmark"></i></button>
-  </div>
 
   <!-- Lock Screen Overlay khi Web Remote bị tắt từ ESP32 -->
   <div id="remoteLockOverlay" style="display:none; position:fixed; inset:0; background:rgba(8, 8, 24, 0.96); backdrop-filter:blur(18px); z-index:99999; flex-direction:column; align-items:center; justify-content:center; text-align:center; padding:24px;">

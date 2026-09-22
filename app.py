@@ -65,16 +65,6 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/manifest.json")
-def manifest():
-    return send_file("static/manifest.json", mimetype="application/manifest+json")
-
-
-@app.route("/sw.js")
-def service_worker():
-    return send_file("static/sw.js", mimetype="application/javascript")
-
-
 # ─── Tìm kiếm ──────────────────────────────────────────────────
 
 @app.route("/api/search", methods=["GET", "POST"])
@@ -1432,18 +1422,15 @@ if __name__ == "__main__":
     except Exception:
         local_ip = "127.0.0.1"
 
-    port = int(os.environ.get("PORT", 4954))
-
     print("=" * 60)
     print("  ESP32 Music Player Server v2")
     print("=" * 60)
-    print(f"  Local URL  : http://localhost:{port}")
-    print(f"  Network URL: http://{local_ip}:{port}")
+    print(f"  Local URL  : http://localhost:5000")
+    print(f"  Network URL: http://{local_ip}:5000")
     print("=" * 60)
     print("  Platforms: ZingMP3 | SoundCloud | YouTube")
     print()
     print("  📋 Nhập vào config.h của ESP32:")
     print(f'     #define SERVER_IP  "{local_ip}"')
-    print(f'     #define SERVER_PORT {port}')
     print("=" * 60)
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
