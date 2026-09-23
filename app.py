@@ -612,6 +612,8 @@ def thumbnail():
     if not url:
         abort(400, "Missing url")
 
+    print(f"[Thumbnail] Request size={size} from {request.remote_addr} for: {url[:60]}")
+
     cache_key = f"{url}:{size}"
     with _thumb_lock:
         cached = _thumb_cache.get(cache_key)
@@ -622,7 +624,7 @@ def thumbnail():
 
     try:
         req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (ESP32MusicPlayer)",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         })
         with urllib.request.urlopen(req, timeout=8) as resp:
             raw = resp.read()
@@ -805,8 +807,14 @@ def player_play():
     if not song_id:
         return jsonify({"error": "Missing song_id"}), 400
 
-    if _player_state.get("remote_locked", False):
+    source = str(data.get("source", "")).lower()
+    user_agent = request.headers.get("User-Agent", "")
+    is_esp = (source == "esp32") or ("ESP32" in user_agent)
+
+    if _player_state.get("remote_locked", False) and not is_esp:
         return jsonify({"error": "Web Remote đã bị khóa từ thiết bị ESP32"}), 403
+
+    print(f"[PlayerHub] PLAY request from {request.remote_addr} (is_esp={is_esp}, locked={_player_state.get('remote_locked')}): {song_id} ({platform})")
 
     # Lấy stream url an toàn cho ESP32 Audio parser
     if song_id.startswith("http"):
@@ -878,8 +886,14 @@ def player_control():
     data   = request.get_json(force=True, silent=True) or {}
     action = str(data.get("action", "")).lower()
 
-    if _player_state.get("remote_locked", False):
+    source = str(data.get("source", "")).lower()
+    user_agent = request.headers.get("User-Agent", "")
+    is_esp = (source == "esp32") or ("ESP32" in user_agent)
+
+    if _player_state.get("remote_locked", False) and not is_esp:
         return jsonify({"error": "Web Remote đã bị khóa từ thiết bị ESP32"}), 403
+
+    print(f"[PlayerHub] CONTROL request from {request.remote_addr} (is_esp={is_esp}, locked={_player_state.get('remote_locked')}): {action}")
 
     with _player_lock:
         global _playlist, _playlist_idx
