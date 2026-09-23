@@ -625,11 +625,22 @@ def thumbnail():
                                  "Content-Length": str(len(cached))})
 
     try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        })
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            raw = resp.read()
+        raw = None
+        try:
+            r = requests.get(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            }, timeout=8)
+            if r.status_code == 200:
+                raw = r.content
+        except Exception:
+            pass
+
+        if not raw:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            })
+            with urllib.request.urlopen(req, timeout=8) as resp:
+                raw = resp.read()
 
         img = Image.open(BytesIO(raw)).convert("RGB")
         # Center-crop vuông trước khi resize để ảnh không bị méo (đặc biệt là thumbnail 16:9 của YouTube)
@@ -644,55 +655,63 @@ def thumbnail():
 
         # Pipeline màu sắc cho TFT RGB565: bão hòa cao + contrast tốt + sắc nét
         from PIL import ImageEnhance, ImageFilter
-        import numpy as np
         img = ImageEnhance.Contrast(img).enhance(1.20)        # Tương phản cao hơn để rõ chi tiết
         img = ImageEnhance.Color(img).enhance(1.40)           # Bão hòa màu cao hơn bù cho RGB565
-        img = ImageEnhance.Sharpness(img).enhance(1.5)        # Sắc nét thêm
-        img = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=130, threshold=2))
+        img = ImageEnhance.Sharpness(img).enhance(1.30)       # Sắc nét thêm
 
-        # Floyd-Steinberg Dithering → RGB565: loại bỏ posterize/banding, màu gradient mượt
-        # Chuyển sang numpy float32 để tính sai số
-        arr = np.array(img, dtype=np.float32)  # shape (H, W, 3), range 0-255
-        H, W = arr.shape[:2]
         buf = bytearray(size * size * 2)
-        idx = 0
 
-        for y in range(H):
-            for x in range(W):
-                r_old = int(min(255, max(0, arr[y, x, 0])))
-                g_old = int(min(255, max(0, arr[y, x, 1])))
-                b_old = int(min(255, max(0, arr[y, x, 2])))
+        # Cố gắng dùng Floyd-Steinberg dithering qua numpy nếu có
+        try:
+            import numpy as np
+            img_filtered = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=130, threshold=2))
+            arr = np.array(img_filtered, dtype=np.float32)
+            H, W = arr.shape[:2]
+            idx = 0
+            for y in range(H):
+                for x in range(W):
+                    r_old = int(min(255, max(0, arr[y, x, 0])))
+                    g_old = int(min(255, max(0, arr[y, x, 1])))
+                    b_old = int(min(255, max(0, arr[y, x, 2])))
 
-                # Lượng tử hóa về RGB565
-                r_new = (r_old & 0xF8)          # 5-bit R: giữ 5 bit cao
-                g_new = (g_old & 0xFC)          # 6-bit G: giữ 6 bit cao
-                b_new = (b_old & 0xF8)          # 5-bit B: giữ 5 bit cao
+                    r_new = (r_old & 0xF8)
+                    g_new = (g_old & 0xFC)
+                    b_new = (b_old & 0xF8)
 
-                # Sai số lượng tử hóa
-                er = r_old - r_new
-                eg = g_old - g_new
-                eb = b_old - b_new
+                    er = r_old - r_new
+                    eg = g_old - g_new
+                    eb = b_old - b_new
 
-                # Phân tán sai số Floyd-Steinberg sang 4 pixel lân cận
-                if x + 1 < W:
-                    arr[y,   x+1, 0] += er * 7 / 16
-                    arr[y,   x+1, 1] += eg * 7 / 16
-                    arr[y,   x+1, 2] += eb * 7 / 16
-                if y + 1 < H:
-                    if x > 0:
-                        arr[y+1, x-1, 0] += er * 3 / 16
-                        arr[y+1, x-1, 1] += eg * 3 / 16
-                        arr[y+1, x-1, 2] += eb * 3 / 16
-                    arr[y+1, x,   0] += er * 5 / 16
-                    arr[y+1, x,   1] += eg * 5 / 16
-                    arr[y+1, x,   2] += eb * 5 / 16
                     if x + 1 < W:
-                        arr[y+1, x+1, 0] += er * 1 / 16
-                        arr[y+1, x+1, 1] += eg * 1 / 16
-                        arr[y+1, x+1, 2] += eb * 1 / 16
+                        arr[y,   x+1, 0] += er * 7 / 16
+                        arr[y,   x+1, 1] += eg * 7 / 16
+                        arr[y,   x+1, 2] += eb * 7 / 16
+                    if y + 1 < H:
+                        if x > 0:
+                            arr[y+1, x-1, 0] += er * 3 / 16
+                            arr[y+1, x-1, 1] += eg * 3 / 16
+                            arr[y+1, x-1, 2] += eb * 3 / 16
+                        arr[y+1, x,   0] += er * 5 / 16
+                        arr[y+1, x,   1] += eg * 5 / 16
+                        arr[y+1, x,   2] += eb * 5 / 16
+                        if x + 1 < W:
+                            arr[y+1, x+1, 0] += er * 1 / 16
+                            arr[y+1, x+1, 1] += eg * 1 / 16
+                            arr[y+1, x+1, 2] += eb * 1 / 16
 
-                # Ghi big-endian RGB565
-                rgb565 = ((r_new & 0xF8) << 8) | ((g_new & 0xFC) << 3) | (b_new >> 3)
+                    rgb565 = ((r_new & 0xF8) << 8) | ((g_new & 0xFC) << 3) | (b_new >> 3)
+                    buf[idx]     = (rgb565 >> 8) & 0xFF
+                    buf[idx + 1] = rgb565 & 0xFF
+                    idx += 2
+        except ImportError:
+            # Fallback pure-Python siêu nhanh (chỉ ~4ms), không phụ thuộc numpy
+            raw_rgb = img.tobytes()
+            idx = 0
+            for i in range(size * size):
+                r = raw_rgb[i * 3]
+                g = raw_rgb[i * 3 + 1]
+                b = raw_rgb[i * 3 + 2]
+                rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
                 buf[idx]     = (rgb565 >> 8) & 0xFF
                 buf[idx + 1] = rgb565 & 0xFF
                 idx += 2
