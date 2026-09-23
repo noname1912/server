@@ -539,14 +539,14 @@ def stream_audio(platform: str, song_id: str):
             threading.Thread(target=_watch_transcode, daemon=True).start()
 
     # 3. STREAM PROGRESSIVE: Đọc từ file tmp_mp3 đang lớn dần
-    # Chờ file có ít nhất 48KB dữ liệu ban đầu (~3.5 giây nhạc) để chống giật âm thanh
+    # Chờ file có ít nhất 16KB dữ liệu ban đầu (~1.2 giây nhạc) để phát cực nhanh <500ms
     t_wait = time.time()
-    while not tmp_mp3.exists() or tmp_mp3.stat().st_size < 49152:
+    while not tmp_mp3.exists() or tmp_mp3.stat().st_size < 16384:
         if proc.poll() is not None and (not tmp_mp3.exists() or tmp_mp3.stat().st_size == 0):
             print("[Stream] FFmpeg khởi động thất bại!")
             abort(502, "Transcode startup failed")
-        time.sleep(0.03)
-        if time.time() - t_wait > 6:
+        time.sleep(0.02)
+        if time.time() - t_wait > 3:
             break
 
     def generate_progressive(tmp_p=tmp_mp3, p=proc, final_p=final_mp3):
@@ -560,8 +560,10 @@ def stream_audio(platform: str, song_id: str):
                     else:
                         # Kiểm tra xem transcode đã hoàn tất chưa
                         if p.poll() is not None:
-                            rem = f.read()
-                            if rem:
+                            while True:
+                                rem = f.read(8192)
+                                if not rem:
+                                    break
                                 yield rem
                             break
                         time.sleep(0.02)
@@ -1187,18 +1189,24 @@ def player_report():
                 _player_state["song"] = None
                 return jsonify({"status": "ok", "action": "standby"})
 
-            # Bỏ qua EOF nếu bài hát vừa bắt đầu < 5 giây (false EOF khi ESP32 mất kết nối tạm thời)
-            if cur_elapsed < 5:
-                print(f"[PlayerHub] Bỏ qua EOF giả (elapsed={cur_elapsed}s < 5s)")
+            curr_song = _player_state.get("song") or {}
+            song_dur = int(curr_song.get("duration", 0))
+
+            # BẢO VỆ CHỐNG NHẢY BÀI SỚM:
+            # Nếu bài hát có thời lượng (> 20s) và chưa phát được ít nhất (duration - 15s):
+            # Đây chỉ là lỗi rớt mạng hoặc đệm tạm thời của Loa, TUYỆT ĐỐI KHÔNG nhảy bài!
+            if song_dur > 20 and cur_elapsed < (song_dur - 15):
+                print(f"[PlayerHub] Bỏ qua EOF non (mới phát {cur_elapsed}s / {song_dur}s) -> Giữ nguyên bài, Loa sẽ tự kết nối lại!")
+            elif cur_elapsed < 10:
+                print(f"[PlayerHub] Bỏ qua EOF quá ngắn (elapsed={cur_elapsed}s < 10s)")
             else:
-                # Cooldown 4 giây giữa 2 lần auto-next liên tiếp
                 last_next = _player_state.get("_last_auto_next_ts", 0)
                 now_ts = _time.time()
-                if now_ts - last_next < 4:
-                    print(f"[PlayerHub] Bỏ qua EOF (cooldown còn {4-(now_ts-last_next):.1f}s)")
+                if now_ts - last_next < 5:
+                    print(f"[PlayerHub] Bỏ qua EOF (cooldown auto-next còn {5-(now_ts-last_next):.1f}s)")
                 else:
                     _player_state["_last_auto_next_ts"] = now_ts
-                    print(f"[PlayerHub] Song finished (EOF, elapsed={cur_elapsed}s) -> Auto-Next...")
+                    print(f"[PlayerHub] Song finished TRULY (EOF, elapsed={cur_elapsed}s / {song_dur}s) -> Auto-Next...")
                     if not _auto_play_next():
                         _player_state["state"] = "next_requested"
 
