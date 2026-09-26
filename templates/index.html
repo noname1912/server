@@ -1192,6 +1192,9 @@
               <button class="btn-sc-outline" onclick="switchView('history')">
                 <i class="fa-solid fa-clock-rotate-left"></i> Xem Lịch Sử (20 Bài)
               </button>
+              <button class="btn-sc-outline" onclick="switchView('wallpaper')" style="border-color:var(--sc-orange); color:var(--sc-orange); background:rgba(255,85,0,0.1);">
+                <i class="fa-solid fa-image"></i> Cài Hình Nền Đồng Hồ
+              </button>
             </div>
           </div>
         </div>
@@ -1372,6 +1375,10 @@
     <button class="mobile-tab-btn" id="mobFavorites" onclick="switchView('favorites')">
       <i class="fa-solid fa-heart"></i>
       <span>Yêu Thích</span>
+    </button>
+    <button class="mobile-tab-btn" id="mobWallpaper" onclick="switchView('wallpaper')">
+      <i class="fa-solid fa-image" style="color:var(--sc-orange);"></i>
+      <span>Hình Nền</span>
     </button>
     <button class="mobile-tab-btn" id="mobQueue" onclick="toggleQueuePanel()">
       <i class="fa-solid fa-list-ul"></i>
@@ -1571,7 +1578,7 @@
         const el = document.getElementById(n);
         if (el) el.classList.remove('active');
       });
-      ['mobDiscover', 'mobSearch', 'mobHistory', 'mobFavorites'].forEach(m => {
+      ['mobDiscover', 'mobSearch', 'mobHistory', 'mobFavorites', 'mobWallpaper'].forEach(m => {
         const el = document.getElementById(m);
         if (el) el.classList.remove('active');
       });
@@ -1601,6 +1608,7 @@
       } else if (viewName === 'wallpaper') {
         document.getElementById('viewWallpaper').style.display = 'block';
         document.getElementById('navWallpaper')?.classList.add('active');
+        document.getElementById('mobWallpaper')?.classList.add('active');
         checkCurrentWallpaper();
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
