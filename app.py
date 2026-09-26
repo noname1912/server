@@ -1408,84 +1408,136 @@ def ai_voice_command():
 # ─── Clock Wallpaper Management ────────────────────────────────
 
 WALLPAPER_BIN = Path(__file__).parent / "static" / "clock_wallpaper.bin"
+WALLPAPER_GIF = Path(__file__).parent / "static" / "clock_wallpaper.gif"
 WALLPAPER_JPG = Path(__file__).parent / "static" / "clock_wallpaper.jpg"
-_wallpaper_version = int(time.time()) if WALLPAPER_BIN.exists() else 0
+
+def _init_wallpaper_version():
+    if WALLPAPER_GIF.exists():
+        return int(WALLPAPER_GIF.stat().st_mtime)
+    if WALLPAPER_BIN.exists():
+        return int(WALLPAPER_BIN.stat().st_mtime)
+    return 0
+
+_wallpaper_version = _init_wallpaper_version()
 
 
 @app.route("/api/wallpaper/upload", methods=["POST"])
 def upload_wallpaper():
-    """Nhận ảnh từ điện thoại, tự động crop 320x240 và chuyển sang RGB565 raw cho ESP32"""
+    """Nhận ảnh / GIF từ điện thoại, xử lý và lưu cho ESP32 tải về"""
     global _wallpaper_version
     file = request.files.get("file")
     if not file:
         return jsonify({"status": "error", "message": "Chưa chọn file ảnh"}), 400
 
+    WALLPAPER_BIN.parent.mkdir(parents=True, exist_ok=True)
+    fname = (file.filename or "").lower()
+    is_gif = fname.endswith(".gif") or (file.content_type or "").startswith("image/gif")
+
     try:
-        img = Image.open(file.stream).convert("RGB")
-        w, h = img.size
+        if is_gif:
+            # ── GIF động: lưu nguyên file, chỉ tạo preview JPEG ──────────
+            raw = file.read()
+            if len(raw) > 950_000:
+                return jsonify({
+                    "status": "error",
+                    "message": f"GIF quá lớn ({len(raw)//1024} KB). Giới hạn 950 KB để vừa SPIFFS."
+                }), 400
 
-        # Căn giữa và cắt theo tỷ lệ 4:3 (320x240)
-        target_ratio = 320.0 / 240.0
-        cur_ratio = w / float(h)
-        if cur_ratio > target_ratio:
-            new_w = int(h * target_ratio)
-            left = (w - new_w) // 2
-            img = img.crop((left, 0, left + new_w, h))
+            # Lưu GIF gốc
+            WALLPAPER_GIF.write_bytes(raw)
+            # Xoá ảnh tĩnh cũ (tiết kiệm SPIFFS)
+            if WALLPAPER_BIN.exists():
+                WALLPAPER_BIN.unlink()
+
+            # Tạo preview JPEG từ frame đầu
+            try:
+                img_pil = Image.open(BytesIO(raw))
+                img_pil.seek(0)
+                img_pil = img_pil.convert("RGB").resize((320, 240), Image.Resampling.LANCZOS)
+                img_pil.save(str(WALLPAPER_JPG), format="JPEG", quality=85)
+            except Exception as pe:
+                print(f"[Wallpaper] Warning: không tạo được preview: {pe}")
+
+            _wallpaper_version = int(time.time())
+            print(f"[Wallpaper] GIF saved {len(raw)} bytes. Version: {_wallpaper_version}")
+            return jsonify({
+                "status": "ok",
+                "message": f"Đã tải GIF động ({len(raw)//1024} KB) lên ESP32!",
+                "version": _wallpaper_version,
+                "is_gif": True,
+                "size_bytes": len(raw),
+                "preview_url": "/api/wallpaper/preview"
+            })
+
         else:
-            new_h = int(w / target_ratio)
-            top = (h - new_h) // 2
-            img = img.crop((0, top, w, top + new_h))
+            # ── Ảnh tĩnh: crop 320×240 → RGB565 binary ───────────────────
+            img = Image.open(file.stream).convert("RGB")
+            w, h = img.size
 
-        img = img.resize((320, 240), Image.Resampling.LANCZOS)
+            target_ratio = 320.0 / 240.0
+            cur_ratio = w / float(h)
+            if cur_ratio > target_ratio:
+                new_w = int(h * target_ratio)
+                left = (w - new_w) // 2
+                img = img.crop((left, 0, left + new_w, h))
+            else:
+                new_h = int(w / target_ratio)
+                top = (h - new_h) // 2
+                img = img.crop((0, top, w, top + new_h))
 
-        # Lưu ảnh JPEG preview chất lượng cao cho Web
-        WALLPAPER_JPG.parent.mkdir(parents=True, exist_ok=True)
-        img.save(str(WALLPAPER_JPG), format="JPEG", quality=88)
+            img = img.resize((320, 240), Image.Resampling.LANCZOS)
+            img.save(str(WALLPAPER_JPG), format="JPEG", quality=88)
 
-        # Chuyển đổi sang mảng byte nhị phân 16-bit RGB565 (Big Endian)
-        pixels = img.load()
-        out = bytearray(320 * 240 * 2)
-        idx = 0
-        for y in range(240):
-            for x in range(320):
-                r, g, b = pixels[x, y]
-                r5 = (r >> 3) & 0x1F
-                g6 = (g >> 2) & 0x3F
-                b5 = (b >> 3) & 0x1F
-                rgb16 = (r5 << 11) | (g6 << 5) | b5
-                out[idx] = (rgb16 >> 8) & 0xFF
-                out[idx + 1] = rgb16 & 0xFF
-                idx += 2
+            pixels = img.load()
+            out = bytearray(320 * 240 * 2)
+            idx = 0
+            for y in range(240):
+                for x in range(320):
+                    r, g, b = pixels[x, y]
+                    rgb16 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+                    out[idx]     = (rgb16 >> 8) & 0xFF
+                    out[idx + 1] = rgb16 & 0xFF
+                    idx += 2
 
-        with open(WALLPAPER_BIN, "wb") as f:
-            f.write(out)
+            WALLPAPER_BIN.write_bytes(out)
+            # Xoá GIF cũ nếu có
+            if WALLPAPER_GIF.exists():
+                WALLPAPER_GIF.unlink()
 
-        _wallpaper_version = int(time.time())
-        print(f"[Wallpaper] Đã cập nhật ảnh nền mới thành công! Version: {_wallpaper_version}")
-
-        return jsonify({
-            "status": "ok",
-            "message": "Cập nhật hình nền đồng hồ thành công!",
-            "version": _wallpaper_version,
-            "preview_url": "/api/wallpaper/preview"
-        })
+            _wallpaper_version = int(time.time())
+            print(f"[Wallpaper] Static image saved. Version: {_wallpaper_version}")
+            return jsonify({
+                "status": "ok",
+                "message": "Cập nhật hình nền đồng hồ thành công!",
+                "version": _wallpaper_version,
+                "is_gif": False,
+                "preview_url": "/api/wallpaper/preview"
+            })
 
     except Exception as e:
-        print(f"[Wallpaper] Lỗi xử lý ảnh: {e}")
+        print(f"[Wallpaper] Lỗi xử lý: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
 @app.route("/api/wallpaper", methods=["GET"])
 def get_wallpaper():
-    """Phục vụ file nhị phân RGB565 (153.600 bytes) cho màn hình ESP32 tải về"""
+    """Phục vụ file RGB565 binary cho ESP32 (ảnh tĩnh)"""
     if not WALLPAPER_BIN.exists():
         abort(404)
     return send_file(str(WALLPAPER_BIN), mimetype="application/octet-stream")
 
 
+@app.route("/api/wallpaper/gif", methods=["GET"])
+def get_wallpaper_gif():
+    """Phục vụ file GIF gốc cho ESP32 tải về SPIFFS"""
+    if not WALLPAPER_GIF.exists():
+        abort(404)
+    return send_file(str(WALLPAPER_GIF), mimetype="image/gif")
+
+
 @app.route("/api/wallpaper/preview", methods=["GET"])
 def get_wallpaper_preview():
-    """Xem trước ảnh nền trên Web điện thoại"""
+    """Xem trước ảnh nền trên Web (JPEG)"""
     if not WALLPAPER_JPG.exists():
         abort(404)
     return send_file(str(WALLPAPER_JPG), mimetype="image/jpeg")
@@ -1493,11 +1545,21 @@ def get_wallpaper_preview():
 
 @app.route("/api/wallpaper/info", methods=["GET"])
 def get_wallpaper_info():
-    """Kiểm tra xem máy chủ có hình nền hay chưa và phiên bản hiện tại"""
+    """Trạng thái ảnh nền hiện tại"""
+    is_gif = WALLPAPER_GIF.exists()
+    has_static = WALLPAPER_BIN.exists()
+    available = is_gif or has_static
+    if is_gif:
+        size = WALLPAPER_GIF.stat().st_size
+    elif has_static:
+        size = WALLPAPER_BIN.stat().st_size
+    else:
+        size = 0
     return jsonify({
-        "available": WALLPAPER_BIN.exists(),
+        "available": available,
+        "is_gif": is_gif,
         "version": _wallpaper_version,
-        "size_bytes": WALLPAPER_BIN.stat().st_size if WALLPAPER_BIN.exists() else 0
+        "size_bytes": size
     })
 
 
