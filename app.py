@@ -1405,6 +1405,102 @@ def ai_voice_command():
     })
 
 
+# ─── Clock Wallpaper Management ────────────────────────────────
+
+WALLPAPER_BIN = Path(__file__).parent / "static" / "clock_wallpaper.bin"
+WALLPAPER_JPG = Path(__file__).parent / "static" / "clock_wallpaper.jpg"
+_wallpaper_version = int(time.time()) if WALLPAPER_BIN.exists() else 0
+
+
+@app.route("/api/wallpaper/upload", methods=["POST"])
+def upload_wallpaper():
+    """Nhận ảnh từ điện thoại, tự động crop 320x240 và chuyển sang RGB565 raw cho ESP32"""
+    global _wallpaper_version
+    file = request.files.get("file")
+    if not file:
+        return jsonify({"status": "error", "message": "Chưa chọn file ảnh"}), 400
+
+    try:
+        img = Image.open(file.stream).convert("RGB")
+        w, h = img.size
+
+        # Căn giữa và cắt theo tỷ lệ 4:3 (320x240)
+        target_ratio = 320.0 / 240.0
+        cur_ratio = w / float(h)
+        if cur_ratio > target_ratio:
+            new_w = int(h * target_ratio)
+            left = (w - new_w) // 2
+            img = img.crop((left, 0, left + new_w, h))
+        else:
+            new_h = int(w / target_ratio)
+            top = (h - new_h) // 2
+            img = img.crop((0, top, w, top + new_h))
+
+        img = img.resize((320, 240), Image.Resampling.LANCZOS)
+
+        # Lưu ảnh JPEG preview chất lượng cao cho Web
+        WALLPAPER_JPG.parent.mkdir(parents=True, exist_ok=True)
+        img.save(str(WALLPAPER_JPG), format="JPEG", quality=88)
+
+        # Chuyển đổi sang mảng byte nhị phân 16-bit RGB565 (Big Endian)
+        pixels = img.load()
+        out = bytearray(320 * 240 * 2)
+        idx = 0
+        for y in range(240):
+            for x in range(320):
+                r, g, b = pixels[x, y]
+                r5 = (r >> 3) & 0x1F
+                g6 = (g >> 2) & 0x3F
+                b5 = (b >> 3) & 0x1F
+                rgb16 = (r5 << 11) | (g6 << 5) | b5
+                out[idx] = (rgb16 >> 8) & 0xFF
+                out[idx + 1] = rgb16 & 0xFF
+                idx += 2
+
+        with open(WALLPAPER_BIN, "wb") as f:
+            f.write(out)
+
+        _wallpaper_version = int(time.time())
+        print(f"[Wallpaper] Đã cập nhật ảnh nền mới thành công! Version: {_wallpaper_version}")
+
+        return jsonify({
+            "status": "ok",
+            "message": "Cập nhật hình nền đồng hồ thành công!",
+            "version": _wallpaper_version,
+            "preview_url": "/api/wallpaper/preview"
+        })
+
+    except Exception as e:
+        print(f"[Wallpaper] Lỗi xử lý ảnh: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/wallpaper", methods=["GET"])
+def get_wallpaper():
+    """Phục vụ file nhị phân RGB565 (153.600 bytes) cho màn hình ESP32 tải về"""
+    if not WALLPAPER_BIN.exists():
+        abort(404)
+    return send_file(str(WALLPAPER_BIN), mimetype="application/octet-stream")
+
+
+@app.route("/api/wallpaper/preview", methods=["GET"])
+def get_wallpaper_preview():
+    """Xem trước ảnh nền trên Web điện thoại"""
+    if not WALLPAPER_JPG.exists():
+        abort(404)
+    return send_file(str(WALLPAPER_JPG), mimetype="image/jpeg")
+
+
+@app.route("/api/wallpaper/info", methods=["GET"])
+def get_wallpaper_info():
+    """Kiểm tra xem máy chủ có hình nền hay chưa và phiên bản hiện tại"""
+    return jsonify({
+        "available": WALLPAPER_BIN.exists(),
+        "version": _wallpaper_version,
+        "size_bytes": WALLPAPER_BIN.stat().st_size if WALLPAPER_BIN.exists() else 0
+    })
+
+
 # ─── Health check ──────────────────────────────────────────────
 
 

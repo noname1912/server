@@ -1132,6 +1132,10 @@
           <span>Hàng Đợi</span>
           <span class="badge-count" id="queueNavBadge">0</span>
         </button>
+        <button class="sc-nav-btn" id="navWallpaper" onclick="switchView('wallpaper')">
+          <i class="fa-solid fa-image" style="color:var(--sc-orange);"></i>
+          <span>Hình Nền Đ.Hồ</span>
+        </button>
       </div>
 
       <div class="sc-nav-group">
@@ -1265,6 +1269,72 @@
           </button>
         </div>
         <div class="sc-track-list" id="queueFullList"></div>
+      </section>
+
+      <!-- VIEW 6: CLOCK WALLPAPER -->
+      <section id="viewWallpaper" style="display:none;">
+        <div class="sc-section-header">
+          <div class="sc-section-title">
+            <i class="fa-solid fa-image" style="color:var(--sc-orange);"></i>
+            <span>Hình Nền Đồng Hồ Để Bàn (320x240)</span>
+          </div>
+        </div>
+
+        <div style="background:var(--sc-surface-1); border:1px solid var(--sc-border); border-radius:18px; padding:24px; max-width:680px; margin:0 auto;">
+          <p style="color:var(--sc-text-muted); font-size:0.9rem; margin-bottom:20px; line-height:1.6;">
+            Tải ảnh cá nhân từ điện thoại lên máy nghe nhạc để làm <b>Khung Ảnh Để Bàn Thông Minh</b>.<br>
+            Server sẽ tự động căn giữa và tối ưu hóa độ phân giải chuẩn <b>320x240</b> màu 16-bit RGB565.
+          </p>
+
+          <!-- Upload Dropzone -->
+          <div style="display:flex; flex-direction:column; align-items:center; justify-content:center; border:2px dashed var(--sc-border); border-radius:16px; padding:28px 16px; background:var(--sc-surface-2); text-align:center; cursor:pointer; transition:border 0.2s;" id="wallpaperDropzone" onclick="document.getElementById('wallpaperFileInput').click()">
+            <input type="file" id="wallpaperFileInput" accept="image/*" style="display:none;" onchange="handleWallpaperSelected(event)" />
+            <div style="width:60px; height:60px; border-radius:50%; background:var(--sc-orange-subtle); color:var(--sc-orange); display:flex; align-items:center; justify-content:center; font-size:1.6rem; margin-bottom:12px;">
+              <i class="fa-solid fa-cloud-arrow-up"></i>
+            </div>
+            <div style="font-weight:700; color:var(--sc-text-main); font-size:1rem; margin-bottom:6px;">Chạm vào đây để chọn ảnh từ điện thoại</div>
+            <div style="color:var(--sc-text-dim); font-size:0.8rem;">Hỗ trợ: JPG, PNG, HEIC, WEBP (Mọi kích thước)</div>
+          </div>
+
+          <!-- Preview & Action Box -->
+          <div id="wallpaperPreviewBox" style="display:none; margin-top:24px; text-align:center;">
+            <div style="font-weight:700; color:var(--sc-text-main); margin-bottom:10px; font-size:0.9rem;">
+              Xem trước màn hình Đồng hồ ESP32 (320 × 240):
+            </div>
+            <!-- Mockup CYD Screen -->
+            <div style="position:relative; width:320px; height:240px; margin:0 auto; border-radius:12px; overflow:hidden; border:3px solid #334155; box-shadow:0 12px 30px rgba(0,0,0,0.8); background:#0f172a;">
+              <img id="wallpaperPreviewImg" src="" style="width:100%; height:100%; object-fit:cover;" />
+              <!-- Mockup Translucent Clock Overlay -->
+              <div style="position:absolute; inset:0; background:rgba(0,0,0,0.25); display:flex; flex-direction:column; justify-content:space-between; padding:10px 14px; pointer-events:none;">
+                <div style="display:flex; justify-content:space-between; align-items:center; color:#fff; font-size:10px; font-weight:bold;">
+                  <span>SMART CLOCK</span>
+                  <span style="color:#10b981;">[==] 85%</span>
+                </div>
+                <div style="text-align:center;">
+                  <div style="font-size:38px; font-weight:800; color:#fff; text-shadow:0 2px 10px rgba(0,0,0,0.8); letter-spacing:2px;">14:30</div>
+                  <div style="font-size:12px; font-weight:600; color:#e2e8f0; text-shadow:0 1px 5px rgba(0,0,0,0.8);">Thu Bay, 26/09/2026</div>
+                </div>
+                <div style="background:rgba(0,0,0,0.6); backdrop-filter:blur(6px); border-radius:6px; padding:4px 8px; font-size:10px; color:#ff5500; text-align:center;">
+                  >> SoundCloud Music Player Ready
+                </div>
+              </div>
+            </div>
+
+            <!-- Upload Button -->
+            <button id="btnUploadWallpaper" onclick="submitWallpaperUpload()" style="margin-top:20px; background:var(--sc-orange); color:white; border:none; border-radius:12px; padding:12px 28px; font-weight:700; font-size:0.95rem; cursor:pointer; box-shadow:0 4px 16px var(--sc-orange-glow); display:inline-flex; align-items:center; gap:8px;">
+              <i class="fa-solid fa-upload"></i> Tải Lên Màn Hình ESP32 Ngay
+            </button>
+          </div>
+
+          <!-- Current Wallpaper Status -->
+          <div id="wallpaperCurrentStatus" style="margin-top:20px; padding:14px 18px; border-radius:12px; background:var(--sc-surface-2); border:1px solid var(--sc-border); display:flex; align-items:center; justify-content:space-between;">
+            <div>
+              <div style="font-weight:700; color:var(--sc-text-main); font-size:0.88rem;" id="wpStatusText">Đang kiểm tra ảnh nền hiện tại...</div>
+              <div style="color:var(--sc-text-dim); font-size:0.78rem;">Định dạng chuẩn RGB565 153.600 bytes</div>
+            </div>
+            <button class="btn-sc-outline" style="font-size:0.78rem; padding:6px 12px;" onclick="checkCurrentWallpaper()">Làm mới</button>
+          </div>
+        </div>
       </section>
 
     </main>
@@ -1493,10 +1563,11 @@
 
     // ─── View Switcher ────────────────────────────────────────
     function switchView(viewName) {
-      ['viewDiscover', 'viewSearch', 'viewHistory', 'viewFavorites', 'viewQueue'].forEach(v => {
-        document.getElementById(v).style.display = 'none';
+      ['viewDiscover', 'viewSearch', 'viewHistory', 'viewFavorites', 'viewQueue', 'viewWallpaper'].forEach(v => {
+        const el = document.getElementById(v);
+        if (el) el.style.display = 'none';
       });
-      ['navDiscover', 'navSearch', 'navHistory', 'navFavorites', 'navQueue'].forEach(n => {
+      ['navDiscover', 'navSearch', 'navHistory', 'navFavorites', 'navQueue', 'navWallpaper'].forEach(n => {
         const el = document.getElementById(n);
         if (el) el.classList.remove('active');
       });
@@ -1527,6 +1598,10 @@
         document.getElementById('viewQueue').style.display = 'block';
         document.getElementById('navQueue')?.classList.add('active');
         loadQueue();
+      } else if (viewName === 'wallpaper') {
+        document.getElementById('viewWallpaper').style.display = 'block';
+        document.getElementById('navWallpaper')?.classList.add('active');
+        checkCurrentWallpaper();
       }
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
@@ -2416,6 +2491,84 @@
       } catch (err) {
         document.getElementById('aiStatus').textContent = 'Lỗi kết nối tới Server: ' + err.message;
         setTimeout(stopVoiceAssistant, 2500);
+      }
+    }
+
+    // ─── Clock Wallpaper Management ─────────────────────────
+    let selectedWallpaperFile = null;
+
+    function handleWallpaperSelected(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      selectedWallpaperFile = file;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const previewImg = document.getElementById('wallpaperPreviewImg');
+        if (previewImg) previewImg.src = e.target.result;
+        const box = document.getElementById('wallpaperPreviewBox');
+        if (box) box.style.display = 'block';
+      };
+      reader.readAsDataURL(file);
+    }
+
+    async function submitWallpaperUpload() {
+      if (!selectedWallpaperFile) {
+        showToast('Vui lòng chọn ảnh trước!');
+        return;
+      }
+      const btn = document.getElementById('btnUploadWallpaper');
+      const oldHtml = btn ? btn.innerHTML : '';
+      if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Đang tối ưu & tải lên...';
+      }
+
+      try {
+        const formData = new FormData();
+        formData.append('file', selectedWallpaperFile);
+
+        const res = await fetch('/api/wallpaper/upload', {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+
+        if (data.status === 'ok') {
+          showToast('🎉 Đã tải ảnh nền lên thành công!');
+          checkCurrentWallpaper();
+        } else {
+          showToast('❌ Lỗi: ' + (data.message || 'Không thể tải ảnh'));
+        }
+      } catch (err) {
+        showToast('Lỗi kết nối: ' + err.message);
+      } finally {
+        if (btn) {
+          btn.disabled = false;
+          btn.innerHTML = oldHtml;
+        }
+      }
+    }
+
+    async function checkCurrentWallpaper() {
+      const statusEl = document.getElementById('wpStatusText');
+      if (!statusEl) return;
+      try {
+        const res = await fetch('/api/wallpaper/info');
+        const data = await res.json();
+        if (data.available) {
+          statusEl.innerHTML = `✅ Đã có ảnh nền trên máy chủ (${(data.size_bytes / 1024).toFixed(1)} KB)<br><span style="font-size:0.75rem; color:var(--sc-orange);">ESP32 sẽ tự tải và hiển thị khi vào màn hình đồng hồ</span>`;
+          if (!selectedWallpaperFile) {
+            const previewImg = document.getElementById('wallpaperPreviewImg');
+            if (previewImg) previewImg.src = '/api/wallpaper/preview?t=' + Date.now();
+            const box = document.getElementById('wallpaperPreviewBox');
+            if (box) box.style.display = 'block';
+          }
+        } else {
+          statusEl.textContent = 'Chưa có ảnh nền nào. Hãy tải một ảnh từ điện thoại!';
+        }
+      } catch (err) {
+        statusEl.textContent = 'Không kiểm tra được trạng thái ảnh nền';
       }
     }
 
