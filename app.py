@@ -539,14 +539,14 @@ def stream_audio(platform: str, song_id: str):
             threading.Thread(target=_watch_transcode, daemon=True).start()
 
     # 3. STREAM PROGRESSIVE: Đọc từ file tmp_mp3 đang lớn dần
-    # Chờ file có ít nhất 16KB dữ liệu ban đầu (~1.2 giây nhạc) để phát cực nhanh <500ms
+    # Chờ file có ít nhất 4KB dữ liệu ban đầu (~300ms nhạc) để bắt đầu stream ngay <150ms
     t_wait = time.time()
-    while not tmp_mp3.exists() or tmp_mp3.stat().st_size < 16384:
+    while not tmp_mp3.exists() or tmp_mp3.stat().st_size < 4096:
         if proc.poll() is not None and (not tmp_mp3.exists() or tmp_mp3.stat().st_size == 0):
             print("[Stream] FFmpeg khởi động thất bại!")
             abort(502, "Transcode startup failed")
-        time.sleep(0.02)
-        if time.time() - t_wait > 3:
+        time.sleep(0.01)
+        if time.time() - t_wait > 2.0:
             break
 
     def generate_progressive(tmp_p=tmp_mp3, p=proc, final_p=final_mp3):
@@ -844,24 +844,23 @@ def player_play():
     else:
         safe_id = song_id
 
+    # Giữ lại URL hợp lệ trong cache nếu có để phát ngay lập tức
+    fresh_url = None
     with _cache_lock:
-        _stream_cache.pop(f"{platform}:{song_id}", None)
-        _stream_cache.pop(f"{platform}:{safe_id}", None)
+        fresh_url = _stream_cache.get(f"{platform}:{song_id}") or _stream_cache.get(f"{platform}:{safe_id}")
 
-    def _prewarm_play(plat=platform, sid=song_id, sfid=safe_id):
+    if not fresh_url:
         try:
-            p_obj = PLATFORMS.get(plat)
+            p_obj = PLATFORMS.get(platform)
             if p_obj and hasattr(p_obj, "get_stream_url"):
-                fresh = p_obj.get_stream_url(sid)
-                if fresh:
+                fresh_url = p_obj.get_stream_url(song_id)
+                if fresh_url:
                     with _cache_lock:
-                        _stream_cache[f"{plat}:{sid}"] = fresh
-                        _stream_cache[f"{plat}:{sfid}"] = fresh
-                    print(f"[PlayerHub] Pre-warmed play URL for {plat}:{sid}")
+                        _stream_cache[f"{platform}:{song_id}"] = fresh_url
+                        _stream_cache[f"{platform}:{safe_id}"] = fresh_url
+                    print(f"[PlayerHub] Pre-resolved stream URL for {platform}:{song_id}")
         except Exception as ex_pw:
-            print(f"[PlayerHub] Pre-warm play error: {ex_pw}")
-
-    threading.Thread(target=_prewarm_play, daemon=True).start()
+            print(f"[PlayerHub] Resolve stream URL error: {ex_pw}")
 
     song_info = {
         "id": song_id,
