@@ -1307,19 +1307,31 @@
             <!-- Mockup CYD Screen -->
             <div style="position:relative; width:320px; height:240px; margin:0 auto; border-radius:12px; overflow:hidden; border:3px solid #334155; box-shadow:0 12px 30px rgba(0,0,0,0.8); background:#0f172a;">
               <img id="wallpaperPreviewImg" src="" style="width:100%; height:100%; object-fit:cover;" />
-              <!-- Mockup Translucent Clock Overlay -->
-              <div style="position:absolute; inset:0; background:rgba(0,0,0,0.25); display:flex; flex-direction:column; justify-content:space-between; padding:10px 14px; pointer-events:none;">
-                <div style="display:flex; justify-content:space-between; align-items:center; color:#fff; font-size:10px; font-weight:bold;">
-                  <span>SMART CLOCK</span>
-                  <span style="color:#10b981;">[==] 85%</span>
+              <!-- Mockup Translucent Clock Overlay — Khớp chính xác với ESP32 thực tế -->
+              <div style="position:absolute; inset:0; pointer-events:none;">
+
+                <!-- Header siêu mỏng (giống ESP32: y=4..26) -->
+                <div style="position:absolute; top:4px; left:8px; right:8px; height:22px; background:rgba(8,8,30,0.85); border:1px solid rgba(41,89,101,0.9); border-radius:4px; display:flex; align-items:center; justify-content:space-between; padding:0 8px;">
+                  <span style="color:#ff5500; font-size:9px; font-weight:bold; letter-spacing:0.5px;">PHOTO CLOCK</span>
+                  <span style="color:#10b981; font-size:9px; font-weight:bold;">🔋 85%</span>
+                  <span style="background:rgba(24,64,195,0.9); border:1px solid rgba(41,89,101,0.8); border-radius:3px; color:#fff; font-size:8px; padding:1px 6px; font-weight:600;">Đổi Kiểu</span>
                 </div>
-                <div style="text-align:center;">
-                  <div style="font-size:38px; font-weight:800; color:#fff; text-shadow:0 2px 10px rgba(0,0,0,0.8); letter-spacing:2px;">14:30</div>
-                  <div style="font-size:12px; font-weight:600; color:#e2e8f0; text-shadow:0 1px 5px rgba(0,0,0,0.8);">Thu Bay, 26/09/2026</div>
+
+                <!-- y=27..175: VÙNG ĐỂ TRỐNG — hình ảnh / mặt nhân vật hiện trọn vẹn -->
+
+                <!-- Dashboard đáy (giống ESP32: y=176..236) -->
+                <div style="position:absolute; bottom:4px; left:10px; right:10px; height:60px; background:rgba(8,8,30,0.85); border:1.5px solid #ff5500; border-radius:8px; display:flex; align-items:center; padding:0 8px; gap:0;">
+                  <!-- Giờ:Phút to -->
+                  <span style="color:#fff; font-size:29px; font-weight:900; letter-spacing:1px; line-height:1; font-family:monospace;">14:30</span>
+                  <!-- :Giây cyan -->
+                  <span style="color:#00ffff; font-size:18px; font-weight:700; line-height:1; margin-right:8px;">:00</span>
+                  <!-- Thông tin phải -->
+                  <div style="display:flex; flex-direction:column; gap:4px; flex:1; overflow:hidden;">
+                    <span style="color:#e2e8f0; font-size:9px; font-weight:600; white-space:nowrap; overflow:hidden;">Smart Clock</span>
+                    <span style="color:#ff5500; font-size:9px; font-weight:600; white-space:nowrap;">Thu Bay, 26/09</span>
+                  </div>
                 </div>
-                <div style="background:rgba(0,0,0,0.6); backdrop-filter:blur(6px); border-radius:6px; padding:4px 8px; font-size:10px; color:#ff5500; text-align:center;">
-                  >> SoundCloud Music Player Ready
-                </div>
+
               </div>
             </div>
 
