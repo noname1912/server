@@ -302,6 +302,135 @@
       box-shadow: 0 4px 12px var(--sc-orange-glow);
     }
 
+    /* Featured Topic Pills Row (Mobile & Desktop) */
+    .sc-topic-pills-bar {
+      display: flex;
+      gap: 8px;
+      padding: 0 0 16px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      -webkit-overflow-scrolling: touch;
+      align-items: center;
+    }
+    .sc-topic-pills-bar::-webkit-scrollbar { display: none; }
+    .topic-pills-label {
+      font-size: 0.78rem;
+      font-weight: 700;
+      color: var(--sc-text-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      margin-right: 4px;
+    }
+    .topic-pill {
+      padding: 6px 14px;
+      border-radius: 20px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid var(--sc-border);
+      color: var(--sc-text-main);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      white-space: nowrap;
+      transition: all 0.2s;
+    }
+    .topic-pill:hover {
+      background: var(--sc-surface-2);
+      border-color: var(--sc-orange);
+      transform: translateY(-1px);
+    }
+    .topic-pill.highlight-pill {
+      background: rgba(255, 85, 0, 0.12);
+      border-color: rgba(255, 85, 0, 0.4);
+      color: var(--sc-orange);
+    }
+    .topic-pill.highlight-pill:hover {
+      background: var(--sc-orange);
+      color: white;
+    }
+
+    /* Topic Cards Grid in Discover View */
+    .sc-topic-cards-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 14px;
+      margin-bottom: 28px;
+    }
+    .sc-topic-card {
+      background: var(--sc-surface-1);
+      border: 1px solid var(--sc-border);
+      border-radius: 14px;
+      padding: 14px 16px;
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .sc-topic-card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; width: 4px; height: 100%;
+      background: transparent;
+      transition: background 0.2s;
+    }
+    .sc-topic-card:hover {
+      background: var(--sc-surface-2);
+      border-color: var(--sc-border-hover);
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.3);
+    }
+    .topic-card-icon {
+      width: 42px;
+      height: 42px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.25rem;
+      flex-shrink: 0;
+    }
+    .topic-card-vina .topic-card-icon { background: rgba(245, 158, 11, 0.15); color: #f59e0b; }
+    .topic-card-vina:hover::before { background: #f59e0b; }
+    .topic-card-tiktok .topic-card-icon { background: rgba(239, 68, 68, 0.15); color: #ef4444; }
+    .topic-card-tiktok:hover::before { background: #ef4444; }
+    .topic-card-lofi .topic-card-icon { background: rgba(16, 185, 129, 0.15); color: #10b981; }
+    .topic-card-lofi:hover::before { background: #10b981; }
+    .topic-card-sontung .topic-card-icon { background: rgba(139, 92, 246, 0.15); color: #8b5cf6; }
+    .topic-card-sontung:hover::before { background: #8b5cf6; }
+    .topic-card-wallpaper { border-color: rgba(255, 85, 0, 0.35); background: rgba(255, 85, 0, 0.04); }
+    .topic-card-wallpaper .topic-card-icon { background: rgba(255, 85, 0, 0.18); color: var(--sc-orange); }
+    .topic-card-wallpaper:hover::before { background: var(--sc-orange); }
+
+    .topic-card-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .topic-card-title {
+      font-size: 0.92rem;
+      font-weight: 700;
+      color: var(--sc-text-main);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .topic-card-desc {
+      font-size: 0.76rem;
+      color: var(--sc-text-dim);
+      margin-top: 2px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     /* Main Content Area */
     .sc-main {
       flex: 1;
@@ -902,9 +1031,96 @@
     .mobile-tab-btn.active { color: var(--sc-orange); }
     .mobile-tab-btn i { font-size: 1.1rem; }
 
+    /* Mobile Drawer Sidebar (Slide-over from left) */
+    .mobile-menu-btn {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 40px;
+      height: 40px;
+      border-radius: 10px;
+      background: var(--sc-surface-2);
+      border: 1px solid var(--sc-border);
+      color: var(--sc-text-main);
+      font-size: 1.15rem;
+      cursor: pointer;
+      flex-shrink: 0;
+      transition: all 0.2s;
+    }
+    .mobile-menu-btn:hover {
+      background: var(--sc-surface-3);
+      color: var(--sc-orange);
+    }
+
+    .sc-mobile-drawer-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(6px);
+      z-index: 250;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+    .sc-mobile-drawer-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .sc-mobile-drawer {
+      position: fixed;
+      top: 0;
+      bottom: 0;
+      left: -310px;
+      width: 290px;
+      max-width: 85vw;
+      background: var(--sc-surface-1);
+      border-right: 1px solid var(--sc-border);
+      z-index: 251;
+      display: flex;
+      flex-direction: column;
+      box-shadow: 10px 0 35px rgba(0, 0, 0, 0.6);
+      transition: left 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      overflow-y: auto;
+    }
+    .sc-mobile-drawer-overlay.open .sc-mobile-drawer {
+      left: 0;
+    }
+    .drawer-header {
+      padding: 16px 18px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px solid var(--sc-border);
+    }
+    .drawer-close-btn {
+      background: var(--sc-surface-2);
+      border: 1px solid var(--sc-border);
+      color: var(--sc-text-dim);
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 1rem;
+      transition: all 0.2s;
+    }
+    .drawer-close-btn:hover {
+      color: white;
+      background: var(--sc-surface-3);
+    }
+    .drawer-body {
+      padding: 18px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
     /* Responsive adjustments */
     @media (max-width: 900px) {
       .sc-sidebar { display: none; }
+      .mobile-menu-btn { display: flex; }
       .sc-mobile-bar { display: flex; }
       .sc-player-bar {
         grid-template-columns: 1fr auto;
@@ -915,6 +1131,27 @@
       .player-right { display: none; }
       body { padding-bottom: calc(var(--player-h) + 52px + 20px); }
       .queue-panel { width: 100%; right: -100%; }
+      .sc-topic-cards-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .sc-header { padding: 0 12px; gap: 8px; }
+      .sc-logo-text { display: none; }
+      .speaker-pill span { display: none; }
+      .speaker-pill { padding: 8px; border-radius: 50%; }
+      .sc-hero { padding: 20px 16px; margin-bottom: 20px; }
+      .sc-hero h2 { font-size: 1.35rem; }
+      .sc-card-grid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 12px;
+      }
+      .sc-topic-cards-grid {
+        grid-template-columns: 1fr;
+        gap: 8px;
+      }
     }
 
     /* Toast Notification */
@@ -938,6 +1175,13 @@
       pointer-events: none;
       transition: all 0.25s ease;
       z-index: 200;
+    }
+    .sc-toast.show {
+      transform: translateY(0);
+      opacity: 1;
+      pointer-events: auto;
+    }
+
     /* XiaoAI Voice Button & Modal */
     .ai-mic-btn {
       width: 42px;
@@ -1058,8 +1302,73 @@
 </head>
 <body>
 
+  <!-- ── Mobile Drawer Sidebar (Slide-over from left) ────────────── -->
+  <div class="sc-mobile-drawer-overlay" id="mobileDrawerOverlay" onclick="toggleMobileSidebar()">
+    <div class="sc-mobile-drawer" onclick="event.stopPropagation()">
+      <div class="drawer-header">
+        <div class="sc-logo" onclick="switchView('discover'); toggleMobileSidebar();" style="cursor:pointer;">
+          <div class="sc-logo-icon"><i class="fa-brands fa-soundcloud"></i></div>
+          <div class="sc-logo-text">SOUND<span>CLOUD</span> <small style="font-size:0.65rem; background:var(--sc-surface-3); padding:2px 6px; border-radius:6px; color:var(--sc-text-dim);">ESP32</small></div>
+        </div>
+        <button class="drawer-close-btn" onclick="toggleMobileSidebar()"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="drawer-body">
+        <div class="sc-nav-group">
+          <div class="sc-nav-title">Menu Chính</div>
+          <button class="sc-nav-btn" onclick="switchView('discover'); toggleMobileSidebar();">
+            <i class="fa-solid fa-compass"></i>
+            <span>Khám Phá</span>
+          </button>
+          <button class="sc-nav-btn" onclick="switchView('search'); toggleMobileSidebar();">
+            <i class="fa-solid fa-magnifying-glass"></i>
+            <span>Tìm Kiếm</span>
+          </button>
+          <button class="sc-nav-btn" onclick="switchView('history'); toggleMobileSidebar();">
+            <i class="fa-solid fa-clock-rotate-left"></i>
+            <span>Lịch Sử Nghe</span>
+          </button>
+          <button class="sc-nav-btn" onclick="switchView('favorites'); toggleMobileSidebar();">
+            <i class="fa-solid fa-heart"></i>
+            <span>Yêu Thích</span>
+          </button>
+          <button class="sc-nav-btn" onclick="switchView('queue'); toggleMobileSidebar();">
+            <i class="fa-solid fa-bars-staggered"></i>
+            <span>Hàng Đợi</span>
+          </button>
+          <button class="sc-nav-btn" onclick="switchView('wallpaper'); toggleMobileSidebar();" style="border: 1px solid rgba(255,85,0,0.4); background: rgba(255,85,0,0.1);">
+            <i class="fa-solid fa-image" style="color:var(--sc-orange);"></i>
+            <span style="font-weight:700; color:var(--sc-orange);">Hình Nền Đ.Hồ ESP32</span>
+          </button>
+        </div>
+
+        <div class="sc-nav-group">
+          <div class="sc-nav-title">Chủ Đề Nổi Bật</div>
+          <button class="sc-nav-btn" onclick="quickSearch('Vinahouse Bass Cực Căng'); toggleMobileSidebar();">
+            <i class="fa-solid fa-bolt" style="color:#f59e0b;"></i>
+            <span>Vinahouse Căng</span>
+          </button>
+          <button class="sc-nav-btn" onclick="quickSearch('Remix TikTok 2026'); toggleMobileSidebar();">
+            <i class="fa-solid fa-fire" style="color:#ef4444;"></i>
+            <span>Remix TikTok Hot</span>
+          </button>
+          <button class="sc-nav-btn" onclick="quickSearch('Chill Lofi Việt'); toggleMobileSidebar();">
+            <i class="fa-solid fa-mug-hot" style="color:#10b981;"></i>
+            <span>Chill Lofi Thư Giãn</span>
+          </button>
+          <button class="sc-nav-btn" onclick="quickSearch('Sơn Tùng M-TP'); toggleMobileSidebar();">
+            <i class="fa-solid fa-star" style="color:#8b5cf6;"></i>
+            <span>Sơn Tùng M-TP</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ── Top Header Navigation ──────────────────────────────────── -->
   <header class="sc-header">
+    <button class="mobile-menu-btn" onclick="toggleMobileSidebar()" title="Danh mục menu">
+      <i class="fa-solid fa-bars"></i>
+    </button>
     <div class="sc-logo" onclick="switchView('discover')">
       <div class="sc-logo-icon">
         <i class="fa-brands fa-soundcloud"></i>
@@ -1178,6 +1487,26 @@
         </button>
       </div>
 
+      <!-- Featured Topics & Wallpapers Quick Pills Bar (Mobile & Desktop) -->
+      <div class="sc-topic-pills-bar">
+        <span class="topic-pills-label"><i class="fa-solid fa-fire" style="color:var(--sc-orange);"></i> Chủ đề:</span>
+        <button class="topic-pill" onclick="quickSearch('Vinahouse Bass Cực Căng')">
+          <i class="fa-solid fa-bolt" style="color:#f59e0b;"></i> Vinahouse Căng
+        </button>
+        <button class="topic-pill" onclick="quickSearch('Remix TikTok 2026')">
+          <i class="fa-solid fa-fire" style="color:#ef4444;"></i> Remix TikTok Hot
+        </button>
+        <button class="topic-pill" onclick="quickSearch('Chill Lofi Việt')">
+          <i class="fa-solid fa-mug-hot" style="color:#10b981;"></i> Chill Lofi Thư Giãn
+        </button>
+        <button class="topic-pill" onclick="quickSearch('Sơn Tùng M-TP')">
+          <i class="fa-solid fa-star" style="color:#8b5cf6;"></i> Sơn Tùng M-TP
+        </button>
+        <button class="topic-pill highlight-pill" onclick="switchView('wallpaper')">
+          <i class="fa-solid fa-image"></i> Cài Hình Nền Đ.Hồ
+        </button>
+      </div>
+
       <!-- VIEW 1: DISCOVER / TRENDING -->
       <section id="viewDiscover">
         <!-- Hero Spotlight -->
@@ -1195,6 +1524,51 @@
               <button class="btn-sc-outline" onclick="switchView('wallpaper')" style="border-color:var(--sc-orange); color:var(--sc-orange); background:rgba(255,85,0,0.1);">
                 <i class="fa-solid fa-image"></i> Cài Hình Nền Đồng Hồ
               </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Featured Topics & Wallpapers Card Grid -->
+        <div class="sc-section-hdr" style="margin-top: 10px;">
+          <div class="sc-section-title">
+            <i class="fa-solid fa-layer-group" style="color:var(--sc-orange);"></i>
+            <span>Chủ Đề Nổi Bật & Tiện Ích</span>
+          </div>
+        </div>
+        <div class="sc-topic-cards-grid">
+          <div class="sc-topic-card topic-card-vina" onclick="quickSearch('Vinahouse Bass Cực Căng')">
+            <div class="topic-card-icon"><i class="fa-solid fa-bolt"></i></div>
+            <div class="topic-card-info">
+              <div class="topic-card-title">Vinahouse Căng</div>
+              <div class="topic-card-desc">Bass đập căng cực cháy</div>
+            </div>
+          </div>
+          <div class="sc-topic-card topic-card-tiktok" onclick="quickSearch('Remix TikTok 2026')">
+            <div class="topic-card-icon"><i class="fa-solid fa-fire"></i></div>
+            <div class="topic-card-info">
+              <div class="topic-card-title">Remix TikTok Hot</div>
+              <div class="topic-card-desc">Bắt trend thịnh hành nhất</div>
+            </div>
+          </div>
+          <div class="sc-topic-card topic-card-lofi" onclick="quickSearch('Chill Lofi Việt')">
+            <div class="topic-card-icon"><i class="fa-solid fa-mug-hot"></i></div>
+            <div class="topic-card-info">
+              <div class="topic-card-title">Chill Lofi Thư Giãn</div>
+              <div class="topic-card-desc">Giai điệu nhẹ nhàng êm ái</div>
+            </div>
+          </div>
+          <div class="sc-topic-card topic-card-sontung" onclick="quickSearch('Sơn Tùng M-TP')">
+            <div class="topic-card-icon"><i class="fa-solid fa-star"></i></div>
+            <div class="topic-card-info">
+              <div class="topic-card-title">Sơn Tùng M-TP</div>
+              <div class="topic-card-desc">Tuyển tập hit đình đám</div>
+            </div>
+          </div>
+          <div class="sc-topic-card topic-card-wallpaper" onclick="switchView('wallpaper')">
+            <div class="topic-card-icon"><i class="fa-solid fa-image"></i></div>
+            <div class="topic-card-info">
+              <div class="topic-card-title">Hình Nền Đồng Hồ</div>
+              <div class="topic-card-desc">Cài ảnh nền cho ESP32</div>
             </div>
           </div>
         </div>
@@ -1578,8 +1952,22 @@
       setTimeout(() => toast.classList.remove('show'), 2600);
     }
 
+    // ─── Mobile Sidebar Toggle ────────────────────────────────
+    function toggleMobileSidebar() {
+      const drawer = document.getElementById('mobileDrawerOverlay');
+      if (drawer) {
+        drawer.classList.toggle('open');
+      }
+    }
+
     // ─── View Switcher ────────────────────────────────────────
     function switchView(viewName) {
+      // Close mobile drawer if open
+      const drawer = document.getElementById('mobileDrawerOverlay');
+      if (drawer && drawer.classList.contains('open')) {
+        drawer.classList.remove('open');
+      }
+
       ['viewDiscover', 'viewSearch', 'viewHistory', 'viewFavorites', 'viewQueue', 'viewWallpaper'].forEach(v => {
         const el = document.getElementById(v);
         if (el) el.style.display = 'none';
