@@ -1581,6 +1581,93 @@ def debug_log():
         return str(e), 500
 
 
+# ─── Weather API (Open-Meteo Integration) ─────────────────────
+
+_weather_cache = {
+    "data": None,
+    "timestamp": 0
+}
+
+@app.route("/api/weather", methods=["GET"])
+def get_weather():
+    """Lấy thông tin thời tiết thời gian thực (nhiệt độ, độ ẩm, icon) cho ESP32"""
+    global _weather_cache
+    now = time.time()
+    # Cache trong 15 phút (900s)
+    if _weather_cache["data"] and (now - _weather_cache["timestamp"] < 900):
+        return jsonify(_weather_cache["data"])
+
+    lat = request.args.get("lat", "21.0285")  # Mặc định Hà Nội
+    lon = request.args.get("lon", "105.8542")
+
+    try:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?"
+            f"latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,weather_code"
+        )
+        req = urllib.request.Request(url, headers={"User-Agent": "ESP32MusicPlayer/2.0"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_json = json.loads(response.read().decode())
+
+        curr = res_json.get("current", {})
+        temp = int(round(curr.get("temperature_2m", 28)))
+        humidity = int(round(curr.get("relative_humidity_2m", 70)))
+        w_code = curr.get("weather_code", 0)
+
+        # Map WMO weather code sang icon nhóm
+        # 0: sun, 1-3: cloud, 45,48: fog, 51-67,80-82: rain, 95-99: thunder
+        if w_code == 0:
+            icon = "sun"
+            text = "Nang quang dang"
+            icon_id = 0
+        elif w_code in [1, 2, 3]:
+            icon = "cloud"
+            text = "Co may"
+            icon_id = 1
+        elif w_code in [45, 48]:
+            icon = "fog"
+            text = "Suong mu"
+            icon_id = 4
+        elif w_code in [95, 96, 99]:
+            icon = "thunder"
+            text = "Dong set"
+            icon_id = 3
+        else:
+            icon = "rain"
+            text = "Mua"
+            icon_id = 2
+
+        weather_data = {
+            "status": "ok",
+            "temp": temp,
+            "humidity": humidity,
+            "icon": icon,
+            "icon_id": icon_id,
+            "text": text,
+            "code": w_code,
+            "cached_at": int(now)
+        }
+        _weather_cache = {
+            "data": weather_data,
+            "timestamp": now
+        }
+        return jsonify(weather_data)
+
+    except Exception as e:
+        print(f"[Weather] Error fetching weather: {e}")
+        if _weather_cache["data"]:
+            return jsonify(_weather_cache["data"])
+        return jsonify({
+            "status": "fallback",
+            "temp": 28,
+            "humidity": 70,
+            "icon": "cloud",
+            "icon_id": 1,
+            "text": "Co may",
+            "code": 1
+        })
+
+
 # ─── Entry Point ───────────────────────────────────────────────
 
 if __name__ == "__main__":
