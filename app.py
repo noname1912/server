@@ -1882,6 +1882,11 @@ def get_weather():
             cloud    = int(curr.get("cloud_cover") or 0)
             is_day   = int(curr.get("is_day", 1))
 
+        # Ban ngày / Ban đêm theo giờ hoàng hôn thực tế tại Hà Nội (mặt trời lặn ~17h48):
+        # Từ 18h00 trở đi hoặc trước 6h00 sáng, hoặc API báo is_day == 0 -> BẮT BUỘC là BAN ĐÊM
+        if now_dt.hour >= 18 or now_dt.hour < 6 or curr.get("is_day") == 0:
+            is_day = 0
+
         temp = int(round(raw_temp))
         humidity = int(round(raw_hum))
         total_rain = precip
@@ -1908,10 +1913,16 @@ def get_weather():
                 text = "Troi nhieu may"
                 icon_id = 1
             else:
-                # WMO 0 (quang đãng), 1 (hầu như không mây), 2 (mây rải rác) -> iPhone đều hiện NẮNG
-                icon = "sun"
-                text = "Troi nang" if is_day else "Troi quang"
-                icon_id = 0
+                # WMO 0 (quang đãng), 1 (hầu như không mây), 2 (mây rải rác)
+                # Ban đêm (is_day == 0) -> Hiện Mặt Trăng (icon_id = 5) chuẩn 100% như iPhone!
+                if is_day == 0:
+                    icon = "moon"
+                    text = "Troi quang (Ban dem)"
+                    icon_id = 5
+                else:
+                    icon = "sun"
+                    text = "Troi nang"
+                    icon_id = 0
 
         weather_data = {
             "status": "ok",
@@ -1931,7 +1942,7 @@ def get_weather():
             "data": weather_data,
             "timestamp": now
         }
-        print(f"[Weather] iPhone-matched Ha Noi ({cur_hour_str}): {temp}C, {humidity}%, icon:{icon_id} ({icon}), cloud:{cloud}%, rain:{total_rain}mm")
+        print(f"[Weather] iPhone-matched Ha Noi ({cur_hour_str}): {temp}C, {humidity}%, icon:{icon_id} ({icon}), is_day:{is_day}")
         return jsonify(weather_data)
 
     except Exception as e:
@@ -1941,11 +1952,11 @@ def get_weather():
             return jsonify(_weather_cache["data"])
         return jsonify({
             "status": "fallback",
-            "temp": 32,
-            "humidity": 65,
-            "icon": "sun",
-            "icon_id": 0,
-            "text": "Troi nang",
+            "temp": 30,
+            "humidity": 70,
+            "icon": "moon",
+            "icon_id": 5,
+            "text": "Troi quang (Ban dem)",
             "code": 0
         })
 
