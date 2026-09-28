@@ -1734,11 +1734,11 @@ _weather_cache = {
 
 @app.route("/api/weather", methods=["GET"])
 def get_weather():
-    """Lấy thông tin thời tiết thời gian thực (nhiệt độ, độ ẩm, icon) cho ESP32 chuẩn xác cho Hà Nội"""
+    """Lấy thông tin thời tiết chuẩn xác theo từng giờ giống hệt iPhone cho Hà Nội"""
     global _weather_cache
     now = time.time()
-    # Cache trong 15 phút (900s)
-    if _weather_cache["data"] and (now - _weather_cache["timestamp"] < 900):
+    # Cache trong 5 phút (300s) để đồng bộ giờ mới nhanh chóng
+    if _weather_cache["data"] and (now - _weather_cache["timestamp"] < 300):
         return jsonify(_weather_cache["data"])
 
     lat = request.args.get("lat", "21.0285")  # Mặc định Hà Nội
@@ -1747,25 +1747,58 @@ def get_weather():
     try:
         url = (
             f"https://api.open-meteo.com/v1/forecast?"
-            f"latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,weather_code,precipitation,rain,showers,cloud_cover,is_day&timezone=Asia%2FBangkok"
+            f"latitude={lat}&longitude={lon}&"
+            f"current=temperature_2m,relative_humidity_2m,weather_code,precipitation,rain,showers,cloud_cover,is_day&"
+            f"hourly=temperature_2m,relative_humidity_2m,weather_code,precipitation,rain,cloud_cover,is_day&"
+            f"timezone=Asia%2FBangkok"
         )
         req = urllib.request.Request(url, headers={"User-Agent": "ESP32MusicPlayer/2.0"})
         with urllib.request.urlopen(req, timeout=6) as response:
             res_json = json.loads(response.read().decode())
 
-        curr = res_json.get("current", {})
-        temp = int(round(curr.get("temperature_2m", 32)))
-        humidity = int(round(curr.get("relative_humidity_2m", 65)))
-        w_code = int(curr.get("weather_code", 0))
-        precip = float(curr.get("precipitation") or 0.0)
-        rain_val = float(curr.get("rain") or 0.0)
-        showers = float(curr.get("showers") or 0.0)
-        cloud = int(curr.get("cloud_cover") or 0)
+        # Khớp theo giờ hiện tại (GMT+7) giống 100% ứng dụng Thời Tiết trên iPhone
+        import datetime
+        try:
+            import zoneinfo
+            tz = zoneinfo.ZoneInfo("Asia/Bangkok")
+            now_dt = datetime.datetime.now(tz)
+        except Exception:
+            # Fallback nếu không có zoneinfo: UTC + 7h
+            now_dt = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
 
-        # Phân loại thời tiết chính xác dựa trên lượng mưa thực tế và độ che phủ mây
-        total_rain = precip + rain_val + showers
+        cur_hour_str = now_dt.strftime("%Y-%m-%dT%H:00")
+
+        hourly = res_json.get("hourly", {})
+        times = hourly.get("time", [])
+        idx = -1
+        for i, t in enumerate(times):
+            if t == cur_hour_str:
+                idx = i
+                break
+
+        curr = res_json.get("current", {})
+
+        if idx != -1:
+            raw_temp = hourly["temperature_2m"][idx]
+            raw_hum  = hourly["relative_humidity_2m"][idx]
+            w_code   = int(hourly["weather_code"][idx])
+            precip   = float(hourly["precipitation"][idx] or 0.0)
+            cloud    = int(hourly["cloud_cover"][idx] or 0)
+            is_day   = int(hourly["is_day"][idx] or 1)
+        else:
+            raw_temp = curr.get("temperature_2m", 32)
+            raw_hum  = curr.get("relative_humidity_2m", 65)
+            w_code   = int(curr.get("weather_code", 0))
+            precip   = float(curr.get("precipitation") or 0.0)
+            cloud    = int(curr.get("cloud_cover") or 0)
+            is_day   = int(curr.get("is_day", 1))
+
+        temp = int(round(raw_temp))
+        humidity = int(round(raw_hum))
+        total_rain = precip
+
+        # Phân loại chuẩn xác như ứng dụng Thời Tiết iPhone:
         if total_rain > 0.2:
-            # Có mưa thực tế
             if w_code in [95, 96, 99]:
                 icon = "thunder"
                 text = "Mua giong sam set"
@@ -1775,23 +1808,21 @@ def get_weather():
                 text = "Troi mua"
                 icon_id = 2
         else:
-            # Không có mưa thực tế (lượng mưa <= 0.2mm) -> Tuyệt đối không báo Mưa hay Sấm chớp
+            # Không có mưa thực tế (lượng mưa <= 0.2mm)
             if w_code in [45, 48]:
                 icon = "fog"
                 text = "Suong mu"
                 icon_id = 4
-            elif cloud <= 35 or w_code == 0:
-                icon = "sun"
-                text = "Nang quang dang"
-                icon_id = 0
-            elif cloud <= 80 or w_code in [1, 2]:
-                icon = "cloud"
-                text = "Co may troi nang"
-                icon_id = 1
-            else:
+            elif cloud > 75 or w_code == 3:
+                # Chỉ khi mây che phủ >75% hoặc WMO 3 (Overcast) mới là Nhiều mây
                 icon = "cloud"
                 text = "Troi nhieu may"
                 icon_id = 1
+            else:
+                # WMO 0 (quang đãng), 1 (hầu như không mây), 2 (mây rải rác) -> iPhone đều hiện NẮNG
+                icon = "sun"
+                text = "Troi nang" if is_day else "Troi quang"
+                icon_id = 0
 
         weather_data = {
             "status": "ok",
@@ -1803,13 +1834,15 @@ def get_weather():
             "code": w_code,
             "rain_mm": total_rain,
             "cloud_cover": cloud,
+            "is_day": is_day,
+            "hour": cur_hour_str,
             "cached_at": int(now)
         }
         _weather_cache = {
             "data": weather_data,
             "timestamp": now
         }
-        print(f"[Weather] Ha Noi: {temp}C, {humidity}%, icon:{icon_id} ({icon}), rain:{total_rain}mm, cloud:{cloud}%")
+        print(f"[Weather] iPhone-matched Ha Noi ({cur_hour_str}): {temp}C, {humidity}%, icon:{icon_id} ({icon}), cloud:{cloud}%, rain:{total_rain}mm")
         return jsonify(weather_data)
 
     except Exception as e:
@@ -1823,7 +1856,7 @@ def get_weather():
             "humidity": 65,
             "icon": "sun",
             "icon_id": 0,
-            "text": "Nang quang dang",
+            "text": "Troi nang",
             "code": 0
         })
 
