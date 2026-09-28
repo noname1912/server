@@ -1470,52 +1470,50 @@ _wallpaper_version = _init_wallpaper_version()
 
 def _enhance_image_for_tft(img: Image.Image, preset: str = "tft_film") -> Image.Image:
     """
-    Tối ưu hóa ảnh hiển thị sắc nét, chống cháy trắng (blown-out highlights)
-    và triệt tiêu hiện tượng hắt sáng (backlight washout) cho màn hình TFT ILI9341 của ESP32.
+    Tối ưu hóa ảnh hiển thị sắc nét, triệt tiêu 100% hiện tượng hắt sáng (backlight glare)
+    và tăng độ tương phản, chiều sâu màu sắc như trên màn hình OLED điện thoại.
     """
     if preset == "original":
-        # Với ảnh gốc: Giữ nguyên màu sắc nhưng vẫn nén nhẹ vùng cháy trắng cực đại
-        # để khi lên màn hình TFT không bị biến thành một mảng trắng lóa mắt
+        # Với ảnh gốc: Giữ màu gốc nhưng ghìm nhẹ trần ánh sáng cực đại ở ~240/255
+        # để tránh tinh thể lỏng mở 100% làm đèn nền chiếu thẳng vào mắt
         lut = []
         for i in range(256):
-            norm = i / 255.0
-            val = norm
-            if val > 0.86:
-                val = 0.86 + (val - 0.86) * 0.55
-            lut.append(max(0, min(255, int(val * 255.0))))
+            x = i / 255.0
+            if x > 0.85:
+                x = 0.85 + (x - 0.85) * 0.50
+            lut.append(max(0, min(255, int(x * 242.0))))
         return img.point(lut * 3)
 
-    # 1. Curve nén vùng sáng (Highlight Roll-off) & Gamma:
-    # Màn hình TFT giá rẻ có hiện tượng Backlight Bleed làm trắng xóa vùng sáng.
-    # Ta nén mượt dải 180-255 và kéo gamma để tạo độ sâu màu đen và bóng đổ.
+    # 1. Đường cong S-Curve + Highlight Ceiling Clamp (Ghìm trần ánh sáng chống hắt sáng):
+    # - Vùng tối (< 0.5): Kéo sâu xuống một chút để màu đen inky, triệt tiêu mờ sương
+    # - Vùng sáng (> 0.5): Uốn cong mượt mà để chủ thể nổi khối
+    # - Trần ánh sáng cực đại (Ceiling): Khóa ở 0.92 (~234/255)
+    #   Điều này giữ cho tinh thể lỏng màn hình TFT luôn có lớp cản sáng ~8-10%,
+    #   triệt tiêu hoàn toàn tia sáng hắt chói từ đèn LED nền mà mắt nhìn vẫn trắng đẹp!
     lut = []
-    gamma = 1.20 if preset == "tft_film" else 1.12
-    soft_clip_thresh = 0.74 if preset == "tft_film" else 0.78
-    soft_clip_rate = 0.52 if preset == "tft_film" else 0.60
+    power = 1.25 if preset == "tft_film" else 1.15
+    ceiling = 0.92 if preset == "tft_film" else 0.94
 
     for i in range(256):
-        norm = i / 255.0
-        val = norm ** gamma
-        # Soft-clip vùng sáng cực đại để không bị bệt trắng/chói lóa
-        if val > soft_clip_thresh:
-            val = soft_clip_thresh + (val - soft_clip_thresh) * soft_clip_rate
-        lut.append(max(0, min(255, int(val * 255.0))))
+        x = i / 255.0
+        if x < 0.5:
+            y = 0.5 * ((2.0 * x) ** power)
+        else:
+            y = 1.0 - 0.5 * ((2.0 * (1.0 - x)) ** power)
+        y = y * ceiling
+        lut.append(max(0, min(255, int(y * 255.0))))
 
     img = img.point(lut * 3)
 
-    # 2. Bão hòa màu (Saturation) bù đắp dải màu hẹp (~60% sRGB) của màn TFT
-    sat_factor = 1.30 if preset == "tft_film" else 1.40
+    # 2. Bão hòa màu (Saturation): Bù đắp dải màu ~60% sRGB của màn TFT
+    sat_factor = 1.36 if preset == "tft_film" else 1.42
     img = ImageEnhance.Color(img).enhance(sat_factor)
 
-    # 3. Tăng độ tương phản (Contrast) giúp tách bạch chủ thể và nền
-    con_factor = 1.20 if preset == "tft_film" else 1.25
+    # 3. Tăng độ tương phản (Contrast)
+    con_factor = 1.16 if preset == "tft_film" else 1.22
     img = ImageEnhance.Contrast(img).enhance(con_factor)
 
-    # 4. Kéo nhẹ độ sáng tổng thể (-6%) để dập tắt hiện tượng đèn nền LED hắt sáng
-    bright_factor = 0.94 if preset == "tft_film" else 0.96
-    img = ImageEnhance.Brightness(img).enhance(bright_factor)
-
-    # 5. Tăng độ nét (Sharpness) sau khi resize về 320x240
+    # 4. Tăng độ nét (Sharpness) sau khi resize về 320x240
     img = ImageEnhance.Sharpness(img).enhance(1.25)
 
     return img
