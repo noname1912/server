@@ -18,7 +18,6 @@ from flask import (Flask, jsonify, request, render_template,
                    Response, stream_with_context, abort, send_file)
 from flask_cors import CORS
 from PIL import Image, ImageEnhance, ImageOps
-import numpy as np
 
 from platforms import PLATFORMS
 import db
@@ -1483,7 +1482,7 @@ def _enhance_image_for_tft(img: Image.Image, preset: str = "tft_film") -> Image.
             val = norm
             if val > 0.86:
                 val = 0.86 + (val - 0.86) * 0.55
-            lut.append(int(np.clip(val * 255.0, 0, 255)))
+            lut.append(max(0, min(255, int(val * 255.0))))
         return img.point(lut * 3)
 
     # 1. Curve nén vùng sáng (Highlight Roll-off) & Gamma:
@@ -1500,7 +1499,7 @@ def _enhance_image_for_tft(img: Image.Image, preset: str = "tft_film") -> Image.
         # Soft-clip vùng sáng cực đại để không bị bệt trắng/chói lóa
         if val > soft_clip_thresh:
             val = soft_clip_thresh + (val - soft_clip_thresh) * soft_clip_rate
-        lut.append(int(np.clip(val * 255.0, 0, 255)))
+        lut.append(max(0, min(255, int(val * 255.0))))
 
     img = img.point(lut * 3)
 
@@ -1524,60 +1523,76 @@ def _enhance_image_for_tft(img: Image.Image, preset: str = "tft_film") -> Image.
 
 def _image_to_rgb565_dithered(img: Image.Image) -> bytearray:
     """
-    Chuyển đổi ảnh RGB sang mảng byte RGB565 với thuật toán tán sắc
-    Floyd-Steinberg Error Diffusion để loại bỏ hoàn toàn hiện tượng
-    dải màu bậc thang (color banding) và giữ độ mịn cho da/bầu trời.
+    Chuyển đổi ảnh RGB sang mảng byte RGB565.
+    Nếu có numpy thì dùng tán sắc Floyd-Steinberg, nếu không thì dùng Pure-Python fallback cực nhanh.
     """
-    arr = np.array(img, dtype=np.float32)
-    h, w, _ = arr.shape
-    out = bytearray(w * h * 2)
+    try:
+        import numpy as np
+        arr = np.array(img, dtype=np.float32)
+        h, w, _ = arr.shape
+        out = bytearray(w * h * 2)
 
-    scale_r = 31.0 / 255.0
-    scale_g = 63.0 / 255.0
-    scale_b = 31.0 / 255.0
+        scale_r = 31.0 / 255.0
+        scale_g = 63.0 / 255.0
+        scale_b = 31.0 / 255.0
 
-    idx = 0
-    for y in range(h):
-        for x in range(w):
-            r = max(0.0, min(255.0, arr[y, x, 0]))
-            g = max(0.0, min(255.0, arr[y, x, 1]))
-            b = max(0.0, min(255.0, arr[y, x, 2]))
+        idx = 0
+        for y in range(h):
+            for x in range(w):
+                r = max(0.0, min(255.0, arr[y, x, 0]))
+                g = max(0.0, min(255.0, arr[y, x, 1]))
+                b = max(0.0, min(255.0, arr[y, x, 2]))
 
-            r5 = max(0, min(31, int(r * scale_r + 0.5)))
-            g6 = max(0, min(63, int(g * scale_g + 0.5)))
-            b5 = max(0, min(31, int(b * scale_b + 0.5)))
+                r5 = max(0, min(31, int(r * scale_r + 0.5)))
+                g6 = max(0, min(63, int(g * scale_g + 0.5)))
+                b5 = max(0, min(31, int(b * scale_b + 0.5)))
 
-            rgb16 = (r5 << 11) | (g6 << 5) | b5
+                rgb16 = (r5 << 11) | (g6 << 5) | b5
+                out[idx]     = (rgb16 >> 8) & 0xFF
+                out[idx + 1] = rgb16 & 0xFF
+                idx += 2
+
+                qr = r5 * (255.0 / 31.0)
+                qg = g6 * (255.0 / 63.0)
+                qb = b5 * (255.0 / 31.0)
+
+                er = r - qr
+                eg = g - qg
+                eb = b - qb
+
+                if x + 1 < w:
+                    arr[y, x + 1, 0] += er * 0.4375
+                    arr[y, x + 1, 1] += eg * 0.4375
+                    arr[y, x + 1, 2] += eb * 0.4375
+                if y + 1 < h:
+                    if x > 0:
+                        arr[y + 1, x - 1, 0] += er * 0.1875
+                        arr[y + 1, x - 1, 1] += eg * 0.1875
+                        arr[y + 1, x - 1, 2] += eb * 0.1875
+                    arr[y + 1, x, 0] += er * 0.3125
+                    arr[y + 1, x, 1] += eg * 0.3125
+                    arr[y + 1, x, 2] += eb * 0.3125
+                    if x + 1 < w:
+                        arr[y + 1, x + 1, 0] += er * 0.0625
+                        arr[y + 1, x + 1, 1] += eg * 0.0625
+                        arr[y + 1, x + 1, 2] += eb * 0.0625
+
+        return out
+    except ImportError:
+        # Fallback pure-Python khi môi trường VPS chưa cài numpy
+        raw_rgb = img.tobytes()
+        w, h = img.size
+        out = bytearray(w * h * 2)
+        idx = 0
+        for i in range(w * h):
+            r = raw_rgb[i * 3]
+            g = raw_rgb[i * 3 + 1]
+            b = raw_rgb[i * 3 + 2]
+            rgb16 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
             out[idx]     = (rgb16 >> 8) & 0xFF
             out[idx + 1] = rgb16 & 0xFF
             idx += 2
-
-            qr = r5 * (255.0 / 31.0)
-            qg = g6 * (255.0 / 63.0)
-            qb = b5 * (255.0 / 31.0)
-
-            er = r - qr
-            eg = g - qg
-            eb = b - qb
-
-            if x + 1 < w:
-                arr[y, x + 1, 0] += er * 0.4375
-                arr[y, x + 1, 1] += eg * 0.4375
-                arr[y, x + 1, 2] += eb * 0.4375
-            if y + 1 < h:
-                if x > 0:
-                    arr[y + 1, x - 1, 0] += er * 0.1875
-                    arr[y + 1, x - 1, 1] += eg * 0.1875
-                    arr[y + 1, x - 1, 2] += eb * 0.1875
-                arr[y + 1, x, 0] += er * 0.3125
-                arr[y + 1, x, 1] += eg * 0.3125
-                arr[y + 1, x, 2] += eb * 0.3125
-                if x + 1 < w:
-                    arr[y + 1, x + 1, 0] += er * 0.0625
-                    arr[y + 1, x + 1, 1] += eg * 0.0625
-                    arr[y + 1, x + 1, 2] += eb * 0.0625
-
-    return out
+        return out
 
 
 def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 940_000) -> bytes:
