@@ -1472,36 +1472,51 @@ _wallpaper_version = _init_wallpaper_version()
 def _enhance_image_for_tft(img: Image.Image, preset: str = "tft_film") -> Image.Image:
     """
     Tối ưu hóa ảnh hiển thị sắc nét, chống cháy trắng (blown-out highlights)
-    và tăng chiều sâu màu sắc cho màn hình TFT ILI9341 của ESP32.
+    và triệt tiêu hiện tượng hắt sáng (backlight washout) cho màn hình TFT ILI9341 của ESP32.
     """
     if preset == "original":
-        return img
+        # Với ảnh gốc: Giữ nguyên màu sắc nhưng vẫn nén nhẹ vùng cháy trắng cực đại
+        # để khi lên màn hình TFT không bị biến thành một mảng trắng lóa mắt
+        lut = []
+        for i in range(256):
+            norm = i / 255.0
+            val = norm
+            if val > 0.86:
+                val = 0.86 + (val - 0.86) * 0.55
+            lut.append(int(np.clip(val * 255.0, 0, 255)))
+        return img.point(lut * 3)
 
     # 1. Curve nén vùng sáng (Highlight Roll-off) & Gamma:
     # Màn hình TFT giá rẻ có hiện tượng Backlight Bleed làm trắng xóa vùng sáng.
-    # Ta nén mượt dải 180-255 và kéo gamma nhẹ ~1.15 để tạo độ sâu màu đen và bóng đổ.
+    # Ta nén mượt dải 180-255 và kéo gamma để tạo độ sâu màu đen và bóng đổ.
     lut = []
-    gamma = 1.15 if preset == "tft_film" else 1.06
+    gamma = 1.20 if preset == "tft_film" else 1.12
+    soft_clip_thresh = 0.74 if preset == "tft_film" else 0.78
+    soft_clip_rate = 0.52 if preset == "tft_film" else 0.60
+
     for i in range(256):
         norm = i / 255.0
         val = norm ** gamma
-        if preset == "tft_film":
-            # Soft-clip vùng sáng cực đại để không bị bệt trắng/chói lóa
-            if val > 0.78:
-                val = 0.78 + (val - 0.78) * 0.65
+        # Soft-clip vùng sáng cực đại để không bị bệt trắng/chói lóa
+        if val > soft_clip_thresh:
+            val = soft_clip_thresh + (val - soft_clip_thresh) * soft_clip_rate
         lut.append(int(np.clip(val * 255.0, 0, 255)))
 
     img = img.point(lut * 3)
 
     # 2. Bão hòa màu (Saturation) bù đắp dải màu hẹp (~60% sRGB) của màn TFT
-    sat_factor = 1.28 if preset == "tft_film" else 1.35
+    sat_factor = 1.30 if preset == "tft_film" else 1.40
     img = ImageEnhance.Color(img).enhance(sat_factor)
 
     # 3. Tăng độ tương phản (Contrast) giúp tách bạch chủ thể và nền
-    con_factor = 1.18 if preset == "tft_film" else 1.22
+    con_factor = 1.20 if preset == "tft_film" else 1.25
     img = ImageEnhance.Contrast(img).enhance(con_factor)
 
-    # 4. Tăng độ nét (Sharpness) sau khi resize về 320x240
+    # 4. Kéo nhẹ độ sáng tổng thể (-6%) để dập tắt hiện tượng đèn nền LED hắt sáng
+    bright_factor = 0.94 if preset == "tft_film" else 0.96
+    img = ImageEnhance.Brightness(img).enhance(bright_factor)
+
+    # 5. Tăng độ nét (Sharpness) sau khi resize về 320x240
     img = ImageEnhance.Sharpness(img).enhance(1.25)
 
     return img
@@ -1565,6 +1580,72 @@ def _image_to_rgb565_dithered(img: Image.Image) -> bytearray:
     return out
 
 
+def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 940_000) -> bytes:
+    """
+    Tự động nén, crop 320x240 và tối ưu số frame/palette cho file GIF lớn (2MB, 5MB...)
+    để vừa vặn phân vùng SPIFFS của ESP32 mà vẫn giữ chuyển động mượt mà và không tràn RAM.
+    """
+    from PIL import ImageSequence
+    im = Image.open(BytesIO(raw))
+    orig_frames = [f.copy() for f in ImageSequence.Iterator(im)]
+    total_f = len(orig_frames)
+
+    step = 1
+    if total_f > 80:
+        step = 2
+    elif total_f > 150:
+        step = 3
+
+    colors = 128
+    target_w, target_h = 320, 240
+    target_ratio = target_w / float(target_h)
+
+    res = raw
+    for attempt in range(3):
+        frames = []
+        durations = []
+        for i in range(0, total_f, step):
+            f = orig_frames[i].convert("RGB")
+            w, h = f.size
+            cur_ratio = w / float(h)
+            if cur_ratio > target_ratio:
+                new_w = int(h * target_ratio)
+                left = (w - new_w) // 2
+                f = f.crop((left, 0, left + new_w, h))
+            else:
+                new_h = int(w / target_ratio)
+                top = (h - new_h) // 2
+                f = f.crop((0, top, w, top + new_h))
+
+            f = f.resize((target_w, target_h), Image.Resampling.LANCZOS)
+            f_p = f.quantize(colors=colors, method=Image.Resampling.NEAREST)
+            frames.append(f_p)
+            dur = max(33, int(im.info.get("duration", 80) * step))
+            durations.append(dur)
+
+        if not frames:
+            break
+
+        out = BytesIO()
+        frames[0].save(
+            out,
+            format="GIF",
+            save_all=True,
+            append_images=frames[1:],
+            duration=durations,
+            loop=0,
+            optimize=True
+        )
+        res = out.getvalue()
+        if len(res) <= max_bytes or attempt == 2:
+            return res
+
+        step += 1
+        colors = 64
+
+    return res
+
+
 @app.route("/api/wallpaper/upload", methods=["POST"])
 def upload_wallpaper():
     """Nhận ảnh / GIF từ điện thoại, xử lý và lưu cho ESP32 tải về"""
@@ -1583,15 +1664,23 @@ def upload_wallpaper():
 
     try:
         if is_gif:
-            # ── GIF động: lưu nguyên file, chỉ tạo preview JPEG ──────────
+            # ── GIF động: Tự động nén & tối ưu frame 320x240 để vừa vặn SPIFFS ──
             raw = file.read()
-            if len(raw) > 950_000:
-                return jsonify({
-                    "status": "error",
-                    "message": f"GIF quá lớn ({len(raw)//1024} KB). Giới hạn 950 KB để vừa SPIFFS."
-                }), 400
+            orig_len = len(raw)
+            if orig_len > 940_000:
+                print(f"[Wallpaper] GIF lớn ({orig_len//1024} KB). Đang tự động nén & tối ưu 320x240...")
+                try:
+                    raw = _optimize_gif_for_esp32(raw, max_bytes=940_000)
+                    print(f"[Wallpaper] GIF nén thành công: {orig_len//1024} KB -> {len(raw)//1024} KB")
+                except Exception as ex_opt:
+                    print(f"[Wallpaper] Lỗi tự động nén GIF: {ex_opt}")
+                    if len(raw) > 950_000:
+                        return jsonify({
+                            "status": "error",
+                            "message": f"GIF quá lớn ({orig_len//1024} KB). Tự động nén thất bại: {ex_opt}"
+                        }), 400
 
-            # Lưu GIF gốc
+            # Lưu GIF gốc / đã tối ưu
             WALLPAPER_GIF.write_bytes(raw)
             # Xoá ảnh tĩnh cũ (tiết kiệm SPIFFS)
             if WALLPAPER_BIN.exists():
