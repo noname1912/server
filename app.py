@@ -448,6 +448,79 @@ def _get_cache_paths(platform: str, song_id: str):
 
 # ─── Stream Audio ───────────────────────────────────────────────
 
+def _start_transcode_background(platform: str, song_id: str, audio_url: str):
+    """Kích hoạt transcode FFmpeg ngầm trước ngay khi chọn bài, để khi Loa ESP32 kết nối tới là có file phát ngay lập tức không bị delay/rỗng"""
+    final_mp3, tmp_mp3 = _get_cache_paths(platform, song_id)
+    if final_mp3.exists() and final_mp3.stat().st_size > 20000:
+        return
+    cache_key = f"{platform}:{song_id}"
+    with _transcode_lock:
+        proc = _active_transcodes.get(cache_key)
+        if proc is not None and proc.poll() is None:
+            return  # Đang chạy rồi
+        if tmp_mp3.exists():
+            try: tmp_mp3.unlink()
+            except Exception: pass
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-loglevel", "quiet",
+            "-reconnect", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+            "-headers", f"Referer: {_get_referer(platform)}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",
+            "-thread_queue_size", "4096",
+            "-i", audio_url,
+            "-vn",
+            "-af", "volume=0.80",
+            "-acodec", "libmp3lame",
+            "-b:a", "128k",
+            "-ar", "44100",
+            "-ac", "2",
+            "-f", "mp3",
+            "-write_xing", "0",
+            str(tmp_mp3)
+        ]
+        try:
+            proc = subprocess.Popen(cmd)
+            _active_transcodes[cache_key] = proc
+            print(f"[Stream-Prewarm] Đã kích hoạt transcode trước cho {cache_key}")
+        except Exception as e:
+            print(f"[Stream-Prewarm] Lỗi khởi động FFmpeg: {e}")
+            return
+
+        def _watch_transcode(p=proc, tmp_p=tmp_mp3, final_p=final_mp3, ckey=cache_key):
+            try:
+                p.wait()
+                if p.returncode == 0 and tmp_p.exists() and tmp_p.stat().st_size > 20000:
+                    if final_p.exists():
+                        try: final_p.unlink()
+                        except Exception: pass
+                    tmp_p.rename(final_p)
+                    print(f"[Stream-Cache] Hoàn tất cache: {final_p.name} ({final_p.stat().st_size // 1024} KB)")
+                    _cleanup_old_cache(60)
+                else:
+                    print(f"[Stream-Cache] Transcode finished/aborted for {ckey}")
+            except Exception as ex:
+                print(f"[Stream-Cache] Watch error: {ex}")
+            finally:
+                with _transcode_lock:
+                    _active_transcodes.pop(ckey, None)
+
+        threading.Thread(target=_watch_transcode, daemon=True).start()
+
+
+@app.route("/api/stream", methods=["GET"])
+def stream_audio_query():
+    """Hỗ trợ tải stream qua query params /api/stream?id=...&platform=... (dùng cho Tải Nhạc về SD trên ESP32)"""
+    platform = request.args.get("platform", "youtube").lower()
+    song_id  = request.args.get("id") or request.args.get("song_id") or ""
+    if not song_id:
+        abort(400, "Missing song id")
+    return stream_audio(platform, song_id)
+
+
 @app.route("/api/stream/<platform>/<path:song_id>")
 def stream_audio(platform: str, song_id: str):
     """
@@ -460,6 +533,15 @@ def stream_audio(platform: str, song_id: str):
         abort(400, "Unknown platform")
 
     song_id = unquote(song_id)
+    # Tự động giải mã base64 nếu song_id dạng b64_...
+    if song_id.startswith("b64_"):
+        try:
+            import base64
+            padded = song_id[4:] + "=" * (-len(song_id[4:]) % 4)
+            song_id = base64.urlsafe_b64decode(padded.encode()).decode()
+        except Exception:
+            pass
+
     final_mp3, tmp_mp3 = _get_cache_paths(platform, song_id)
 
     # 1. NẾU ĐÃ CÓ TRONG CACHE HOÀN CHỈNH -> PHÁT NGAY LẬP TỨC 100% MƯỢT
@@ -486,71 +568,32 @@ def stream_audio(platform: str, song_id: str):
     print(f"[Stream] Caching & streaming: {platform}:{song_id} -> {tmp_mp3.name}")
 
     # Bắt đầu transcode ghi vào tmp_mp3 với tốc độ tối đa (unthrottled)
+    _start_transcode_background(platform, song_id, audio_url)
     with _transcode_lock:
         proc = _active_transcodes.get(cache_key)
-        if proc is None or proc.poll() is not None:
-            # Xóa tmp cũ nếu có
-            if tmp_mp3.exists():
-                try: tmp_mp3.unlink()
-                except Exception: pass
-
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-loglevel", "quiet",
-                "-reconnect", "1",
-                "-reconnect_streamed", "1",
-                "-reconnect_delay_max", "5",
-                "-headers", f"Referer: {_get_referer(platform)}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",
-                "-thread_queue_size", "4096",
-                "-i", audio_url,
-                "-vn",
-                "-af", "volume=0.80",
-                "-acodec", "libmp3lame",
-                "-b:a", "128k",
-                "-ar", "44100",
-                "-ac", "2",
-                "-f", "mp3",
-                "-write_xing", "0",
-                str(tmp_mp3)
-            ]
-            proc = subprocess.Popen(cmd)
-            _active_transcodes[cache_key] = proc
-
-            # Thread giám sát khi transcode xong -> đổi tên thành final_mp3
-            def _watch_transcode(p=proc, tmp_p=tmp_mp3, final_p=final_mp3, ckey=cache_key):
-                try:
-                    p.wait()
-                    if p.returncode == 0 and tmp_p.exists() and tmp_p.stat().st_size > 20000:
-                        if final_p.exists():
-                            try: final_p.unlink()
-                            except Exception: pass
-                        tmp_p.rename(final_p)
-                        print(f"[Stream-Cache] Hoàn tất cache: {final_p.name} ({final_p.stat().st_size // 1024} KB)")
-                        _cleanup_old_cache(60)
-                    else:
-                        print(f"[Stream-Cache] Transcode finished/aborted for {ckey}")
-                except Exception as ex:
-                    print(f"[Stream-Cache] Watch error: {ex}")
-                finally:
-                    with _transcode_lock:
-                        _active_transcodes.pop(ckey, None)
-
-            threading.Thread(target=_watch_transcode, daemon=True).start()
-
-    # 3. STREAM PROGRESSIVE: Đọc từ file tmp_mp3 đang lớn dần
-    # Chờ file có ít nhất 4KB dữ liệu ban đầu (~300ms nhạc) để bắt đầu stream ngay <150ms
-    t_wait = time.time()
-    while not tmp_mp3.exists() or tmp_mp3.stat().st_size < 4096:
-        if proc.poll() is not None and (not tmp_mp3.exists() or tmp_mp3.stat().st_size == 0):
-            print("[Stream] FFmpeg khởi động thất bại!")
-            abort(502, "Transcode startup failed")
-        time.sleep(0.01)
-        if time.time() - t_wait > 2.0:
-            break
 
     def generate_progressive(tmp_p=tmp_mp3, p=proc, final_p=final_mp3):
-        curr_file = final_p if final_p.exists() else tmp_p
+        # Chờ tối đa 12 giây cho tới khi có ít nhất 4KB dữ liệu (~300ms nhạc)
+        t0 = time.time()
+        curr_file = None
+        while time.time() - t0 < 12.0:
+            target = final_p if final_p.exists() else tmp_p
+            if target.exists() and target.stat().st_size >= 4096:
+                curr_file = target
+                break
+            if p and p.poll() is not None:
+                target = final_p if final_p.exists() else tmp_p
+                if target.exists() and target.stat().st_size > 0:
+                    curr_file = target
+                    break
+                print("[Stream] Transcode failed or produced empty file")
+                return
+            time.sleep(0.04)
+
+        if not curr_file or not curr_file.exists():
+            print("[Stream] Timeout chờ file tmp_mp3 xuất hiện")
+            return
+
         try:
             with open(curr_file, "rb") as f:
                 while True:
@@ -558,8 +601,7 @@ def stream_audio(platform: str, song_id: str):
                     if chunk:
                         yield chunk
                     else:
-                        # Kiểm tra xem transcode đã hoàn tất chưa
-                        if p.poll() is not None:
+                        if p and p.poll() is not None:
                             while True:
                                 rem = f.read(8192)
                                 if not rem:
@@ -568,7 +610,6 @@ def stream_audio(platform: str, song_id: str):
                             break
                         time.sleep(0.02)
         except Exception:
-            # Client ngắt kết nối
             pass
 
     return Response(
@@ -797,6 +838,7 @@ def _auto_play_next() -> bool:
                     with _cache_lock:
                         _stream_cache[f"{plat}:{sid}"] = fresh
                         _stream_cache[f"{plat}:{sfid}"] = fresh
+                    _start_transcode_background(plat, sid, fresh)
                     print(f"[PlayerHub] Pre-warmed next URL for {plat}:{sid}")
         except Exception as ex_pw:
             print(f"[PlayerHub] Pre-warm next error: {ex_pw}")
@@ -861,6 +903,11 @@ def player_play():
                     print(f"[PlayerHub] Pre-resolved stream URL for {platform}:{song_id}")
         except Exception as ex_pw:
             print(f"[PlayerHub] Resolve stream URL error: {ex_pw}")
+
+    if fresh_url:
+        _start_transcode_background(platform, song_id, fresh_url)
+        if safe_id != song_id:
+            _start_transcode_background(platform, safe_id, fresh_url)
 
     song_info = {
         "id": song_id,
@@ -1590,7 +1637,7 @@ _weather_cache = {
 
 @app.route("/api/weather", methods=["GET"])
 def get_weather():
-    """Lấy thông tin thời tiết thời gian thực (nhiệt độ, độ ẩm, icon) cho ESP32"""
+    """Lấy thông tin thời tiết thời gian thực (nhiệt độ, độ ẩm, icon) cho ESP32 chuẩn xác cho Hà Nội"""
     global _weather_cache
     now = time.time()
     # Cache trong 15 phút (900s)
@@ -1603,39 +1650,51 @@ def get_weather():
     try:
         url = (
             f"https://api.open-meteo.com/v1/forecast?"
-            f"latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,weather_code"
+            f"latitude={lat}&longitude={lon}&current=temperature_2m,relative_humidity_2m,weather_code,precipitation,rain,showers,cloud_cover,is_day&timezone=Asia%2FBangkok"
         )
         req = urllib.request.Request(url, headers={"User-Agent": "ESP32MusicPlayer/2.0"})
-        with urllib.request.urlopen(req, timeout=5) as response:
+        with urllib.request.urlopen(req, timeout=6) as response:
             res_json = json.loads(response.read().decode())
 
         curr = res_json.get("current", {})
-        temp = int(round(curr.get("temperature_2m", 28)))
-        humidity = int(round(curr.get("relative_humidity_2m", 70)))
-        w_code = curr.get("weather_code", 0)
+        temp = int(round(curr.get("temperature_2m", 32)))
+        humidity = int(round(curr.get("relative_humidity_2m", 65)))
+        w_code = int(curr.get("weather_code", 0))
+        precip = float(curr.get("precipitation") or 0.0)
+        rain_val = float(curr.get("rain") or 0.0)
+        showers = float(curr.get("showers") or 0.0)
+        cloud = int(curr.get("cloud_cover") or 0)
 
-        # Map WMO weather code sang icon nhóm
-        # 0: sun, 1-3: cloud, 45,48: fog, 51-67,80-82: rain, 95-99: thunder
-        if w_code == 0:
-            icon = "sun"
-            text = "Nang quang dang"
-            icon_id = 0
-        elif w_code in [1, 2, 3]:
-            icon = "cloud"
-            text = "Co may"
-            icon_id = 1
-        elif w_code in [45, 48]:
-            icon = "fog"
-            text = "Suong mu"
-            icon_id = 4
-        elif w_code in [95, 96, 99]:
-            icon = "thunder"
-            text = "Dong set"
-            icon_id = 3
+        # Phân loại thời tiết chính xác dựa trên lượng mưa thực tế và độ che phủ mây
+        total_rain = precip + rain_val + showers
+        if total_rain > 0.2:
+            # Có mưa thực tế
+            if w_code in [95, 96, 99]:
+                icon = "thunder"
+                text = "Mua giong sam set"
+                icon_id = 3
+            else:
+                icon = "rain"
+                text = "Troi mua"
+                icon_id = 2
         else:
-            icon = "rain"
-            text = "Mua"
-            icon_id = 2
+            # Không có mưa thực tế (lượng mưa <= 0.2mm) -> Tuyệt đối không báo Mưa hay Sấm chớp
+            if w_code in [45, 48]:
+                icon = "fog"
+                text = "Suong mu"
+                icon_id = 4
+            elif cloud <= 35 or w_code == 0:
+                icon = "sun"
+                text = "Nang quang dang"
+                icon_id = 0
+            elif cloud <= 80 or w_code in [1, 2]:
+                icon = "cloud"
+                text = "Co may troi nang"
+                icon_id = 1
+            else:
+                icon = "cloud"
+                text = "Troi nhieu may"
+                icon_id = 1
 
         weather_data = {
             "status": "ok",
@@ -1645,26 +1704,30 @@ def get_weather():
             "icon_id": icon_id,
             "text": text,
             "code": w_code,
+            "rain_mm": total_rain,
+            "cloud_cover": cloud,
             "cached_at": int(now)
         }
         _weather_cache = {
             "data": weather_data,
             "timestamp": now
         }
+        print(f"[Weather] Ha Noi: {temp}C, {humidity}%, icon:{icon_id} ({icon}), rain:{total_rain}mm, cloud:{cloud}%")
         return jsonify(weather_data)
 
     except Exception as e:
         print(f"[Weather] Error fetching weather: {e}")
+        # Giữ lại dữ liệu hợp lệ gần nhất, KHÔNG nhảy về số 28°C hay icon giả
         if _weather_cache["data"]:
             return jsonify(_weather_cache["data"])
         return jsonify({
             "status": "fallback",
-            "temp": 28,
-            "humidity": 70,
-            "icon": "cloud",
-            "icon_id": 1,
-            "text": "Co may",
-            "code": 1
+            "temp": 32,
+            "humidity": 65,
+            "icon": "sun",
+            "icon_id": 0,
+            "text": "Nang quang dang",
+            "code": 0
         })
 
 
