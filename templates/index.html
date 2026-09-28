@@ -1707,8 +1707,30 @@
               </div>
             </div>
 
+            <!-- Bộ lọc màu sắc cho màn hình TFT ESP32 -->
+            <div style="margin-top:16px; text-align:left; background:var(--sc-surface-1); border:1px solid var(--sc-border); border-radius:12px; padding:12px 14px;">
+              <div style="font-weight:700; font-size:0.85rem; color:var(--sc-text-main); margin-bottom:8px; display:flex; align-items:center; justify-content:space-between;">
+                <span><i class="fa-solid fa-wand-magic-sparkles" style="color:var(--sc-orange); margin-right:6px;"></i> Bộ Lọc Tối Ưu Màn Hình TFT:</span>
+                <span id="presetDesc" style="font-size:0.75rem; color:var(--sc-orange); font-weight:600;">Chống Cháy Trắng</span>
+              </div>
+              <div style="display:grid; grid-template-columns:repeat(3, 1fr); gap:8px;">
+                <button type="button" class="btn-sc-outline wp-preset-btn active" id="btnPresetTft" onclick="selectWallpaperPreset('tft_film')" style="font-size:0.76rem; padding:8px 4px; text-align:center;">
+                  🌟 TFT Film (Chuẩn)
+                </button>
+                <button type="button" class="btn-sc-outline wp-preset-btn" id="btnPresetVivid" onclick="selectWallpaperPreset('vivid')" style="font-size:0.76rem; padding:8px 4px; text-align:center;">
+                  🌈 Rực Rỡ (Vivid)
+                </button>
+                <button type="button" class="btn-sc-outline wp-preset-btn" id="btnPresetOrig" onclick="selectWallpaperPreset('original')" style="font-size:0.76rem; padding:8px 4px; text-align:center;">
+                  📷 Ảnh Gốc
+                </button>
+              </div>
+              <div style="font-size:0.74rem; color:var(--sc-text-dim); margin-top:8px; line-height:1.4;">
+                💡 <b>Giải pháp chống bạc trắng:</b> Chế độ <b>TFT Film</b> tự động nén dải sáng (Highlight Roll-off) giúp da mặt & mây trời không bị bệt trắng bởi đèn nền LED, tăng độ tương phản và khử răng cưa Floyd-Steinberg mịn màng.
+              </div>
+            </div>
+
             <!-- Upload Button -->
-            <button id="btnUploadWallpaper" onclick="submitWallpaperUpload()" style="margin-top:20px; background:var(--sc-orange); color:white; border:none; border-radius:12px; padding:12px 28px; font-weight:700; font-size:0.95rem; cursor:pointer; box-shadow:0 4px 16px var(--sc-orange-glow); display:inline-flex; align-items:center; gap:8px;">
+            <button id="btnUploadWallpaper" onclick="submitWallpaperUpload()" style="margin-top:16px; background:var(--sc-orange); color:white; border:none; border-radius:12px; padding:12px 28px; font-weight:700; font-size:0.95rem; cursor:pointer; box-shadow:0 4px 16px var(--sc-orange-glow); display:inline-flex; align-items:center; gap:8px;">
               <i class="fa-solid fa-upload"></i> Tải Lên Màn Hình ESP32 Ngay
             </button>
           </div>
@@ -2902,6 +2924,45 @@
 
     // ─── Clock Wallpaper Management ─────────────────────────
     let selectedWallpaperFile = null;
+    let selectedWallpaperPreset = 'tft_film';
+
+    function selectWallpaperPreset(preset) {
+      selectedWallpaperPreset = preset;
+      const bTft = document.getElementById('btnPresetTft');
+      const bVivid = document.getElementById('btnPresetVivid');
+      const bOrig = document.getElementById('btnPresetOrig');
+      const pDesc = document.getElementById('presetDesc');
+      const previewImg = document.getElementById('wallpaperPreviewImg');
+
+      [bTft, bVivid, bOrig].forEach(b => {
+        if (b) {
+          b.style.background = 'transparent';
+          b.style.color = 'var(--sc-text-main)';
+          b.style.borderColor = 'var(--sc-border)';
+        }
+      });
+
+      let activeBtn = bTft;
+      if (preset === 'vivid') {
+        activeBtn = bVivid;
+        if (pDesc) pDesc.textContent = 'Màu Rực Rỡ';
+        if (previewImg) previewImg.style.filter = 'contrast(1.22) saturate(1.35) brightness(1.0)';
+      } else if (preset === 'original') {
+        activeBtn = bOrig;
+        if (pDesc) pDesc.textContent = 'Ảnh Nguyên Bản';
+        if (previewImg) previewImg.style.filter = 'none';
+      } else {
+        activeBtn = bTft;
+        if (pDesc) pDesc.textContent = 'Chống Cháy Trắng (Film)';
+        if (previewImg) previewImg.style.filter = 'contrast(1.18) saturate(1.28) brightness(0.95)';
+      }
+
+      if (activeBtn) {
+        activeBtn.style.background = 'var(--sc-orange)';
+        activeBtn.style.color = 'white';
+        activeBtn.style.borderColor = 'var(--sc-orange)';
+      }
+    }
 
     function handleWallpaperSelected(event) {
       const file = event.target.files[0];
@@ -2914,6 +2975,7 @@
         if (previewImg) previewImg.src = e.target.result;
         const box = document.getElementById('wallpaperPreviewBox');
         if (box) box.style.display = 'block';
+        selectWallpaperPreset(selectedWallpaperPreset);
       };
       reader.readAsDataURL(file);
     }
@@ -2933,6 +2995,7 @@
       try {
         const formData = new FormData();
         formData.append('file', selectedWallpaperFile);
+        formData.append('preset', selectedWallpaperPreset);
 
         const res = await fetch('/api/wallpaper/upload', {
           method: 'POST',

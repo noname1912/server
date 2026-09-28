@@ -17,7 +17,8 @@ from urllib.parse import unquote
 from flask import (Flask, jsonify, request, render_template,
                    Response, stream_with_context, abort, send_file)
 from flask_cors import CORS
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageOps
+import numpy as np
 
 from platforms import PLATFORMS
 import db
@@ -1468,6 +1469,102 @@ def _init_wallpaper_version():
 _wallpaper_version = _init_wallpaper_version()
 
 
+def _enhance_image_for_tft(img: Image.Image, preset: str = "tft_film") -> Image.Image:
+    """
+    Tối ưu hóa ảnh hiển thị sắc nét, chống cháy trắng (blown-out highlights)
+    và tăng chiều sâu màu sắc cho màn hình TFT ILI9341 của ESP32.
+    """
+    if preset == "original":
+        return img
+
+    # 1. Curve nén vùng sáng (Highlight Roll-off) & Gamma:
+    # Màn hình TFT giá rẻ có hiện tượng Backlight Bleed làm trắng xóa vùng sáng.
+    # Ta nén mượt dải 180-255 và kéo gamma nhẹ ~1.15 để tạo độ sâu màu đen và bóng đổ.
+    lut = []
+    gamma = 1.15 if preset == "tft_film" else 1.06
+    for i in range(256):
+        norm = i / 255.0
+        val = norm ** gamma
+        if preset == "tft_film":
+            # Soft-clip vùng sáng cực đại để không bị bệt trắng/chói lóa
+            if val > 0.78:
+                val = 0.78 + (val - 0.78) * 0.65
+        lut.append(int(np.clip(val * 255.0, 0, 255)))
+
+    img = img.point(lut * 3)
+
+    # 2. Bão hòa màu (Saturation) bù đắp dải màu hẹp (~60% sRGB) của màn TFT
+    sat_factor = 1.28 if preset == "tft_film" else 1.35
+    img = ImageEnhance.Color(img).enhance(sat_factor)
+
+    # 3. Tăng độ tương phản (Contrast) giúp tách bạch chủ thể và nền
+    con_factor = 1.18 if preset == "tft_film" else 1.22
+    img = ImageEnhance.Contrast(img).enhance(con_factor)
+
+    # 4. Tăng độ nét (Sharpness) sau khi resize về 320x240
+    img = ImageEnhance.Sharpness(img).enhance(1.25)
+
+    return img
+
+
+def _image_to_rgb565_dithered(img: Image.Image) -> bytearray:
+    """
+    Chuyển đổi ảnh RGB sang mảng byte RGB565 với thuật toán tán sắc
+    Floyd-Steinberg Error Diffusion để loại bỏ hoàn toàn hiện tượng
+    dải màu bậc thang (color banding) và giữ độ mịn cho da/bầu trời.
+    """
+    arr = np.array(img, dtype=np.float32)
+    h, w, _ = arr.shape
+    out = bytearray(w * h * 2)
+
+    scale_r = 31.0 / 255.0
+    scale_g = 63.0 / 255.0
+    scale_b = 31.0 / 255.0
+
+    idx = 0
+    for y in range(h):
+        for x in range(w):
+            r = max(0.0, min(255.0, arr[y, x, 0]))
+            g = max(0.0, min(255.0, arr[y, x, 1]))
+            b = max(0.0, min(255.0, arr[y, x, 2]))
+
+            r5 = max(0, min(31, int(r * scale_r + 0.5)))
+            g6 = max(0, min(63, int(g * scale_g + 0.5)))
+            b5 = max(0, min(31, int(b * scale_b + 0.5)))
+
+            rgb16 = (r5 << 11) | (g6 << 5) | b5
+            out[idx]     = (rgb16 >> 8) & 0xFF
+            out[idx + 1] = rgb16 & 0xFF
+            idx += 2
+
+            qr = r5 * (255.0 / 31.0)
+            qg = g6 * (255.0 / 63.0)
+            qb = b5 * (255.0 / 31.0)
+
+            er = r - qr
+            eg = g - qg
+            eb = b - qb
+
+            if x + 1 < w:
+                arr[y, x + 1, 0] += er * 0.4375
+                arr[y, x + 1, 1] += eg * 0.4375
+                arr[y, x + 1, 2] += eb * 0.4375
+            if y + 1 < h:
+                if x > 0:
+                    arr[y + 1, x - 1, 0] += er * 0.1875
+                    arr[y + 1, x - 1, 1] += eg * 0.1875
+                    arr[y + 1, x - 1, 2] += eb * 0.1875
+                arr[y + 1, x, 0] += er * 0.3125
+                arr[y + 1, x, 1] += eg * 0.3125
+                arr[y + 1, x, 2] += eb * 0.3125
+                if x + 1 < w:
+                    arr[y + 1, x + 1, 0] += er * 0.0625
+                    arr[y + 1, x + 1, 1] += eg * 0.0625
+                    arr[y + 1, x + 1, 2] += eb * 0.0625
+
+    return out
+
+
 @app.route("/api/wallpaper/upload", methods=["POST"])
 def upload_wallpaper():
     """Nhận ảnh / GIF từ điện thoại, xử lý và lưu cho ESP32 tải về"""
@@ -1475,6 +1572,10 @@ def upload_wallpaper():
     file = request.files.get("file")
     if not file:
         return jsonify({"status": "error", "message": "Chưa chọn file ảnh"}), 400
+
+    preset = request.form.get("preset", "tft_film").strip().lower()
+    if preset not in ("tft_film", "vivid", "original"):
+        preset = "tft_film"
 
     WALLPAPER_BIN.parent.mkdir(parents=True, exist_ok=True)
     fname = (file.filename or "").lower()
@@ -1501,7 +1602,8 @@ def upload_wallpaper():
                 img_pil = Image.open(BytesIO(raw))
                 img_pil.seek(0)
                 img_pil = img_pil.convert("RGB").resize((320, 240), Image.Resampling.LANCZOS)
-                img_pil.save(str(WALLPAPER_JPG), format="JPEG", quality=85)
+                img_pil = _enhance_image_for_tft(img_pil, preset)
+                img_pil.save(str(WALLPAPER_JPG), format="JPEG", quality=88)
             except Exception as pe:
                 print(f"[Wallpaper] Warning: không tạo được preview: {pe}")
 
@@ -1517,7 +1619,7 @@ def upload_wallpaper():
             })
 
         else:
-            # ── Ảnh tĩnh: crop 320×240 → RGB565 binary ───────────────────
+            # ── Ảnh tĩnh: crop 320×240 → Auto-Enhance TFT → RGB565 Dithered ─
             img = Image.open(file.stream).convert("RGB")
             w, h = img.size
 
@@ -1533,18 +1635,13 @@ def upload_wallpaper():
                 img = img.crop((0, top, w, top + new_h))
 
             img = img.resize((320, 240), Image.Resampling.LANCZOS)
-            img.save(str(WALLPAPER_JPG), format="JPEG", quality=88)
+            
+            # Tối ưu hóa màu sắc, chống cháy trắng cho màn hình TFT ESP32
+            img = _enhance_image_for_tft(img, preset)
+            img.save(str(WALLPAPER_JPG), format="JPEG", quality=90)
 
-            pixels = img.load()
-            out = bytearray(320 * 240 * 2)
-            idx = 0
-            for y in range(240):
-                for x in range(320):
-                    r, g, b = pixels[x, y]
-                    rgb16 = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
-                    out[idx]     = (rgb16 >> 8) & 0xFF
-                    out[idx + 1] = rgb16 & 0xFF
-                    idx += 2
+            # Chuyển đổi RGB565 bằng Floyd-Steinberg dithering mượt mà
+            out = _image_to_rgb565_dithered(img)
 
             WALLPAPER_BIN.write_bytes(out)
             # Xoá GIF cũ nếu có
@@ -1552,10 +1649,10 @@ def upload_wallpaper():
                 WALLPAPER_GIF.unlink()
 
             _wallpaper_version = int(time.time())
-            print(f"[Wallpaper] Static image saved. Version: {_wallpaper_version}")
+            print(f"[Wallpaper] Static image saved (preset: {preset}). Version: {_wallpaper_version}")
             return jsonify({
                 "status": "ok",
-                "message": "Cập nhật hình nền đồng hồ thành công!",
+                "message": f"Cập nhật hình nền thành công (chế độ {preset})!",
                 "version": _wallpaper_version,
                 "is_gif": False,
                 "preview_url": "/api/wallpaper/preview"
