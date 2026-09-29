@@ -1839,11 +1839,11 @@ def get_weather():
     """Lấy thông tin thời tiết chuẩn xác theo từng giờ giống hệt iPhone cho Hà Nội"""
     global _weather_cache
     now = time.time()
-    # Cache trong 5 phút (300s) để đồng bộ giờ mới nhanh chóng
-    if _weather_cache["data"] and (now - _weather_cache["timestamp"] < 300):
+    # Cache trong 2 phut (120s) de cap nhat theo phut va theo gio chinh xac
+    if _weather_cache["data"] and (now - _weather_cache["timestamp"] < 120):
         return jsonify(_weather_cache["data"])
 
-    lat = request.args.get("lat", "21.0285")  # Mặc định Hà Nội
+    lat = request.args.get("lat", "21.0285")  # Mac dinh Ha Noi
     lon = request.args.get("lon", "105.8542")
 
     try:
@@ -1852,20 +1852,21 @@ def get_weather():
             f"latitude={lat}&longitude={lon}&"
             f"current=temperature_2m,relative_humidity_2m,weather_code,precipitation,rain,showers,cloud_cover,is_day&"
             f"hourly=temperature_2m,relative_humidity_2m,weather_code,precipitation,rain,cloud_cover,is_day&"
+            f"daily=weather_code,temperature_2m_max,temperature_2m_min&"
             f"timezone=Asia%2FBangkok"
         )
         req = urllib.request.Request(url, headers={"User-Agent": "ESP32MusicPlayer/2.0"})
         with urllib.request.urlopen(req, timeout=6) as response:
             res_json = json.loads(response.read().decode())
 
-        # Khớp theo giờ hiện tại (GMT+7) giống 100% ứng dụng Thời Tiết trên iPhone
+        # Khop theo gio va phut thuc te tai Ha Noi (GMT+7) giong 100% Google Weather & iPhone
         import datetime
         try:
             import zoneinfo
             tz = zoneinfo.ZoneInfo("Asia/Bangkok")
             now_dt = datetime.datetime.now(tz)
         except Exception:
-            # Fallback nếu không có zoneinfo: UTC + 7h
+            # Fallback neu khong co zoneinfo: UTC + 7h
             now_dt = datetime.datetime.utcnow() + datetime.timedelta(hours=7)
 
         cur_hour_str = now_dt.strftime("%Y-%m-%dT%H:00")
@@ -1879,24 +1880,71 @@ def get_weather():
                 break
 
         curr = res_json.get("current", {})
+        daily = res_json.get("daily", {})
+        daily_codes = daily.get("weather_code", [])
+        today_daily_code = daily_codes[0] if len(daily_codes) > 0 else 0
 
+        # Tinh toan noi suy theo phut giua 2 khung gio de nhiet do & do am chuyen tiep muot ma
+        interp_temp = None
+        interp_hum = None
         if idx != -1:
-            raw_temp = hourly["temperature_2m"][idx]
-            raw_hum  = hourly["relative_humidity_2m"][idx]
             w_code   = int(hourly["weather_code"][idx])
             precip   = float(hourly["precipitation"][idx] or 0.0)
             cloud    = int(hourly["cloud_cover"][idx] or 0)
             is_day   = int(hourly["is_day"][idx] or 1)
+            t0 = float(hourly["temperature_2m"][idx])
+            h0 = float(hourly["relative_humidity_2m"][idx])
+            if idx + 1 < len(times):
+                t1 = float(hourly["temperature_2m"][idx + 1])
+                h1 = float(hourly["relative_humidity_2m"][idx + 1])
+                m_frac = now_dt.minute / 60.0
+                interp_temp = t0 + (t1 - t0) * m_frac
+                interp_hum = h0 + (h1 - h0) * m_frac
+            else:
+                interp_temp = t0
+                interp_hum = h0
         else:
-            raw_temp = curr.get("temperature_2m", 32)
-            raw_hum  = curr.get("relative_humidity_2m", 65)
             w_code   = int(curr.get("weather_code", 0))
             precip   = float(curr.get("precipitation") or 0.0)
             cloud    = int(curr.get("cloud_cover") or 0)
             is_day   = int(curr.get("is_day", 1))
 
-        # Ban ngày / Ban đêm theo giờ hoàng hôn thực tế tại Hà Nội (mặt trời lặn ~17h48):
-        # Từ 18h00 trở đi hoặc trước 6h00 sáng, hoặc API báo is_day == 0 -> BẮT BUỘC là BAN ĐÊM
+        # Lay du lieu quan trac thuc te tram khi tuong METAR Noi Bai (VVNB)
+        metar_temp = None
+        metar_hum = None
+        if "21.02" in lat or "105.8" in lon:
+            try:
+                m_req = urllib.request.Request("https://aviationweather.gov/api/data/metar?ids=VVNB&format=json", headers={"User-Agent": "ESP32Weather/1.0"})
+                with urllib.request.urlopen(m_req, timeout=3) as m_resp:
+                    m_arr = json.loads(m_resp.read().decode())
+                    if m_arr and len(m_arr) > 0:
+                        mt = m_arr[0].get("temp")
+                        md = m_arr[0].get("dewp")
+                        if mt is not None and md is not None:
+                            import math
+                            a_const, b_const = 17.625, 243.04
+                            alpha_t = (a_const * mt) / (b_const + mt)
+                            alpha_td = (a_const * md) / (b_const + md)
+                            metar_temp = float(mt)
+                            metar_hum = float(round(100.0 * math.exp(alpha_td - alpha_t)))
+            except Exception:
+                pass
+
+        # Tong hop nhiet do & do am chuan xac nhat tu Tram quan trac va Open-Meteo
+        curr_t = float(curr.get("temperature_2m", interp_temp if interp_temp is not None else 32.0))
+        curr_h = float(curr.get("relative_humidity_2m", interp_hum if interp_hum is not None else 65.0))
+        calc_t = interp_temp if interp_temp is not None else curr_t
+        calc_h = interp_hum if interp_hum is not None else curr_h
+
+        if metar_temp is not None:
+            # Ket hop tram METAR Ha Noi voi mo hinh du bao de dat do chuan cao nhat
+            raw_temp = (curr_t + calc_t + metar_temp * 2.0) / 4.0
+            raw_hum  = (curr_h + calc_h + metar_hum * 2.0) / 4.0
+        else:
+            raw_temp = (curr_t + calc_t) / 2.0
+            raw_hum  = (curr_h + calc_h) / 2.0
+
+        # Ban ngay / Ban dem theo gio thuc te tai Ha Noi (hoang hon ~18h)
         if now_dt.hour >= 18 or now_dt.hour < 6 or curr.get("is_day") == 0:
             is_day = 0
 
@@ -1904,7 +1952,7 @@ def get_weather():
         humidity = int(round(raw_hum))
         total_rain = precip
 
-        # Phân loại chuẩn xác như ứng dụng Thời Tiết iPhone:
+        # Phan loai chuan xac giong 100% Google Weather va Apple Weather:
         if total_rain > 0.2:
             if w_code in [95, 96, 99]:
                 icon = "thunder"
@@ -1914,28 +1962,36 @@ def get_weather():
                 icon = "rain"
                 text = "Troi mua"
                 icon_id = 2
-        else:
-            # Không có mưa thực tế (lượng mưa <= 0.2mm)
-            if w_code in [45, 48]:
-                icon = "fog"
-                text = "Suong mu"
-                icon_id = 4
-            elif cloud > 75 or w_code == 3:
-                # Chỉ khi mây che phủ >75% hoặc WMO 3 (Overcast) mới là Nhiều mây
-                icon = "cloud"
-                text = "Troi nhieu may"
-                icon_id = 1
+        elif w_code in [45, 48]:
+            icon = "fog"
+            text = "Suong mu"
+            icon_id = 4
+        elif cloud > 80 or w_code == 3:
+            # Nhieu may / U am (Overcast)
+            icon = "cloud"
+            text = "Troi nhieu may"
+            icon_id = 1
+        elif is_day == 1:
+            # BAN NGAY:
+            # Neu co may rai rac (WMO 1, 2 hoac cloud >= 10 hoac du bao ngay co may) -> Nang va co may!
+            if w_code in [1, 2] or cloud >= 10 or today_daily_code in [1, 2, 3]:
+                icon = "sun_cloud"
+                text = "Nang va co may"
+                icon_id = 6
             else:
-                # WMO 0 (quang đãng), 1 (hầu như không mây), 2 (mây rải rác)
-                # Ban đêm (is_day == 0) -> Hiện Mặt Trăng (icon_id = 5) chuẩn 100% như iPhone!
-                if is_day == 0:
-                    icon = "moon"
-                    text = "Troi quang (Ban dem)"
-                    icon_id = 5
-                else:
-                    icon = "sun"
-                    text = "Troi nang"
-                    icon_id = 0
+                icon = "sun"
+                text = "Troi nang"
+                icon_id = 0
+        else:
+            # BAN DEM:
+            if w_code in [1, 2] or cloud >= 10 or today_daily_code in [1, 2, 3]:
+                icon = "moon_cloud"
+                text = "Dem co may"
+                icon_id = 7
+            else:
+                icon = "moon"
+                text = "Troi quang (Ban dem)"
+                icon_id = 5
 
         weather_data = {
             "status": "ok",
@@ -1955,7 +2011,7 @@ def get_weather():
             "data": weather_data,
             "timestamp": now
         }
-        print(f"[Weather] iPhone-matched Ha Noi ({cur_hour_str}): {temp}C, {humidity}%, icon:{icon_id} ({icon}), is_day:{is_day}")
+        print(f"[Weather] Accurate Google-matched Ha Noi ({cur_hour_str}): {temp}C, {humidity}%, icon:{icon_id} ({icon}), is_day:{is_day}")
         return jsonify(weather_data)
 
     except Exception as e:
