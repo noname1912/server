@@ -1291,7 +1291,7 @@ def ai_voice_command():
     Body JSON: {"command": "mở bài Cắt Đôi Nỗi Sầu"}
     """
     data = request.get_json(force=True, silent=True) or {}
-    cmd = (data.get("command") or data.get("text") or "").strip().lower()
+    cmd = (data.get("command") or data.get("text") or "").strip()
 
     if not cmd:
         return jsonify({"status": "error", "message": "Không nghe rõ câu lệnh, vui lòng thử lại!"}), 400
@@ -1299,10 +1299,14 @@ def ai_voice_command():
     if _player_state.get("remote_locked", False):
         return jsonify({"status": "error", "message": "XiaoAI: Web Remote đang bị KHÓA từ màn hình ESP32. Hãy bật lại trên ESP32 để sử dụng!"}), 403
 
-    print(f"[XiaoAI] Nhan lenh giong noi: '{cmd}'")
+    print(f"[XiaoAI] Nhan lenh goc: '{cmd}'")
 
-    # 1. Nhan dien cac lenh dieu khien nhanh
-    if any(w in cmd for w in ["tắt máy", "tắt loa", "tắt nguồn", "đi ngủ", "sleep", "ngủ đi"]):
+    # Xoa dau cham, phay, cham than o dau/cuoi chuoi do Speech API tao ra
+    clean_cmd = re.sub(r'^[.,!?:;"\'\s]+|[.,!?:;"\'\s]+$', '', cmd).strip()
+    cmd_lower = clean_cmd.lower()
+
+    # 1. Nhan dien cac lenh dieu khien he thong
+    if any(w in cmd_lower for w in ["tắt máy", "tắt loa", "tắt nguồn", "đi ngủ", "sleep", "ngủ đi", "dừng hẳn"]):
         with _player_lock:
             _player_state["power"] = "off"
             _player_state["state"] = "stopped"
@@ -1310,13 +1314,13 @@ def ai_voice_command():
             _player_state["seq"] = int(time.time() * 1000) % 2000000000
         return jsonify({"status": "ok", "action": "power", "power": "off", "message": "XiaoAI: Đã tắt máy và chuyển sang chế độ ngủ."})
 
-    if any(w in cmd for w in ["bật máy", "bật loa", "mở máy", "bật nguồn", "thức dậy", "wake up"]):
+    if any(w in cmd_lower for w in ["bật máy", "bật loa", "mở máy", "bật nguồn", "thức dậy", "wake up"]):
         with _player_lock:
             _player_state["power"] = "on"
             _player_state["seq"] = int(time.time() * 1000) % 2000000000
         return jsonify({"status": "ok", "action": "power", "power": "on", "message": "XiaoAI: Đã bật máy và sẵn sàng hoạt động!"})
 
-    if any(w in cmd for w in ["tiếp theo", "bài tiếp", "qua bài", "next"]):
+    if any(w in cmd_lower for w in ["tiếp theo", "bài tiếp", "qua bài", "chuyển bài", "bài sau", "bài kế", "next"]):
         with _player_lock:
             ok = _auto_play_next()
         if ok:
@@ -1328,48 +1332,51 @@ def ai_voice_command():
             })
         return jsonify({"status": "ok", "action": "next", "message": "Hàng đợi trống, không có bài tiếp theo."})
 
-    if any(w in cmd for w in ["dừng lại", "tạm dừng", "pause", "tắt nhạc", "im lặng", "stop"]):
+    if any(w in cmd_lower for w in ["dừng lại", "tạm dừng", "dừng nhạc", "tắt nhạc", "im lặng", "ngưng", "pause", "stop"]):
         with _player_lock:
             _player_state["state"] = "paused"
             _player_state["seq"] = int(time.time() * 1000) % 2000000000
         return jsonify({"status": "ok", "action": "pause", "message": "XiaoAI: Đã tạm dừng phát nhạc."})
 
-    if any(w in cmd for w in ["tiếp tục", "phát tiếp", "resume", "bật lại"]):
+    if any(w in cmd_lower for w in ["tiếp tục", "phát tiếp", "bật lại", "chơi tiếp", "resume", "play"]):
         with _player_lock:
             _player_state["state"] = "playing"
             _player_state["seq"] = int(time.time() * 1000) % 2000000000
         return jsonify({"status": "ok", "action": "resume", "message": "XiaoAI: Tiếp tục phát nhạc."})
 
-    if any(w in cmd for w in ["tăng âm lượng", "to lên", "bật to", "âm lượng to", "cho to"]):
+    if any(w in cmd_lower for w in ["tăng âm lượng", "to lên", "bật to", "âm lượng to", "cho to", "to hơn", "lớn hơn", "tăng volume"]):
         with _player_lock:
             _player_state["volume"] = min(21, _player_state.get("volume", 11) + 2)
         return jsonify({"status": "ok", "action": "volume", "volume": _player_state["volume"], "message": f"XiaoAI: Đã tăng âm lượng lên {_player_state['volume']}/21."})
 
-    if any(w in cmd for w in ["giảm âm lượng", "nhỏ lại", "bật nhỏ", "âm lượng nhỏ", "cho nhỏ"]):
+    if any(w in cmd_lower for w in ["giảm âm lượng", "nhỏ lại", "bật nhỏ", "âm lượng nhỏ", "cho nhỏ", "nhỏ hơn", "bé hơn", "giảm volume"]):
         with _player_lock:
             _player_state["volume"] = max(0, _player_state.get("volume", 11) - 2)
         return jsonify({"status": "ok", "action": "volume", "volume": _player_state["volume"], "message": f"XiaoAI: Đã giảm âm lượng xuống {_player_state['volume']}/21."})
 
     # 2. Xử lý yêu cầu tìm & phát bài hát
+    # Bỏ xiaoai ơi, trợ lý ơi...
+    query = re.sub(r'^(xiaoai|xiao ai|trợ lý|bot)\s+(ơi|à|nhé)?\s*', '', clean_cmd, flags=re.IGNORECASE).strip()
+
     prefixes = [
-        "mở bài hát", "mở ca khúc", "mở bản nhạc", "mở bài", "mở nhạc", "mở",
-        "phát bài hát", "phát ca khúc", "phát bản nhạc", "phát bài", "phát nhạc", "phát",
-        "bật bài hát", "bật ca khúc", "bật bản nhạc", "bật bài", "bật nhạc", "bật",
-        "tìm bài hát", "tìm ca khúc", "tìm bài", "tìm kiếm", "tìm",
-        "cho tôi nghe bài", "cho nghe bài", "nghe bài", "nghe",
+        "mở bài hát", "mở ca khúc", "mở bản nhạc", "mở bài", "mở nhạc", "mở giúp bài", "mở cho tôi bài", "mở cho tao bài", "mở cho em bài", "mở cho mình bài", "mở hộ bài", "mở",
+        "phát bài hát", "phát ca khúc", "phát bản nhạc", "phát bài", "phát nhạc", "phát cho tôi bài", "phát cho em bài", "phát hộ bài", "phát",
+        "bật bài hát", "bật ca khúc", "bật bản nhạc", "bật bài", "bật nhạc", "bật cho tôi bài", "bật cho em bài", "bật hộ bài", "bật",
+        "tìm bài hát", "tìm ca khúc", "tìm bài", "tìm kiếm bài", "tìm kiếm", "tìm",
+        "cho tôi nghe bài", "cho nghe bài", "cho mình nghe bài", "cho em nghe bài", "nghe bài", "nghe",
         "hát bài", "chơi bài", "play"
     ]
-    query = cmd
     for p in prefixes:
-        if query.startswith(p + " "):
-            query = query[len(p)+1:].strip()
-            break
-        elif query.startswith(p):
-            query = query[len(p):].strip()
+        pat = r'^' + re.escape(p) + r'\s+'
+        if re.search(pat, query, re.IGNORECASE):
+            query = re.sub(pat, '', query, count=1, flags=re.IGNORECASE).strip()
             break
 
+    # Bo cac tu dem cuoi cau: "nhe", "oi", "di", "gium", "ho", "giup", "nao"
+    query = re.sub(r'\s+(ơi|ạ|nhé|nhá|nào|đi|giùm|hộ|giúp)$', '', query, flags=re.IGNORECASE).strip()
+
     if not query:
-        query = cmd
+        query = clean_cmd
 
     print(f"[XiaoAI] Trich xuat tu khoa: '{query}'")
 

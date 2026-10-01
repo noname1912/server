@@ -1864,6 +1864,10 @@
       <div class="ai-title">XiaoAI Voice Assistant</div>
       <div class="ai-status-text" id="aiStatus">Đang lắng nghe giọng nói của bạn...</div>
       <div class="ai-transcript" id="aiTranscript">"Hãy nói: Mở bài Cắt Đôi Nỗi Sầu..."</div>
+      <div class="ai-input-row" style="display:flex; width:100%; gap:8px;">
+        <input type="text" id="aiManualInput" placeholder="Hoặc gõ câu lệnh tại đây..." style="flex:1; background:var(--sc-surface-2); border:1px solid var(--sc-border); border-radius:12px; padding:10px 14px; color:var(--sc-text-main); font-size:0.9rem;" onkeydown="if(event.key==='Enter') submitManualAiCommand()">
+        <button class="btn btn-primary" onclick="submitManualAiCommand()" style="border-radius:12px; padding:0 18px; font-weight:700;"><i class="fa-solid fa-paper-plane"></i> Gửi</button>
+      </div>
       <div class="ai-tips">
         💡 <b>Mẫu câu lệnh:</b><br>
         • "Mở bài Sơn Tùng M-TP" • "Bật nhạc remix TikTok"<br>
@@ -2800,9 +2804,11 @@
       }
     }, 1000);
 
-    // ─── XiaoAI Voice Assistant (Web Speech API) ────────────────
     let voiceRecognition = null;
     let isListening = false;
+    let voiceSilenceTimer = null;
+    let accumulatedFinal = '';
+    let isSubmitting = false;
 
     function initVoiceAssistant() {
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -2811,37 +2817,75 @@
       }
       const recog = new SpeechRecognition();
       recog.lang = 'vi-VN';
-      recog.continuous = false;
-      recog.interimResults = true;
+      recog.continuous = true;       // Lắng nghe trọn vẹn cả câu, không bị ngắt quãng giữa chừng
+      recog.interimResults = true;    // Hiển thị chữ tức thì theo thời gian thực
+      recog.maxAlternatives = 1;
 
       recog.onstart = () => {
         isListening = true;
+        accumulatedFinal = '';
+        isSubmitting = false;
         document.getElementById('aiMicBtn').classList.add('listening');
         document.getElementById('aiModal').classList.add('show');
-        document.getElementById('aiStatus').textContent = 'Đang lắng nghe giọng nói của bạn...';
-        document.getElementById('aiTranscript').textContent = 'Đang thu âm...';
+        document.getElementById('aiStatus').innerHTML = '<span style="color:#22c55e;"><i class="fa-solid fa-microphone"></i> Đang lắng nghe giọng nói của bạn...</span>';
+        document.getElementById('aiTranscript').textContent = 'Đang thu âm... Hãy nói câu lệnh của bạn';
+        const inp = document.getElementById('aiManualInput');
+        if (inp) inp.value = '';
       };
 
       recog.onresult = (e) => {
-        let transcript = '';
-        for (let i = e.resultIndex; i < e.results.length; i++) {
-          transcript += e.results[i][0].transcript;
+        if (isSubmitting) return;
+
+        let interim = '';
+        let final = '';
+        for (let i = 0; i < e.results.length; i++) {
+          if (e.results[i].isFinal) {
+            final += e.results[i][0].transcript + ' ';
+          } else {
+            interim += e.results[i][0].transcript;
+          }
         }
-        document.getElementById('aiTranscript').textContent = `"${transcript}"`;
-        if (e.results[e.results.length - 1].isFinal) {
-          handleVoiceCommand(transcript);
+        accumulatedFinal = final.trim();
+        const currentSentence = (final + interim).trim();
+
+        if (currentSentence) {
+          document.getElementById('aiTranscript').textContent = `"${currentSentence}"`;
+          const inp = document.getElementById('aiManualInput');
+          if (inp && document.activeElement !== inp) {
+            inp.value = currentSentence;
+          }
+
+          // Tự động nhận lệnh sau 1.3 giây im lặng khi người nói đã dứt câu
+          if (voiceSilenceTimer) clearTimeout(voiceSilenceTimer);
+          voiceSilenceTimer = setTimeout(() => {
+            if (currentSentence && !isSubmitting) {
+              isSubmitting = true;
+              stopVoiceAssistant();
+              handleVoiceCommand(currentSentence);
+            }
+          }, 1300);
         }
       };
 
       recog.onerror = (e) => {
         console.warn('Voice error:', e);
-        document.getElementById('aiStatus').textContent = 'Không nhận diện được âm thanh hoặc đã hủy.';
-        setTimeout(stopVoiceAssistant, 1800);
+        if (e.error === 'no-speech') {
+          document.getElementById('aiStatus').textContent = 'Chưa nghe thấy giọng nói. Hãy nói to và rõ hơn nhé!';
+        } else {
+          document.getElementById('aiStatus').textContent = 'Lỗi nhận diện âm thanh: ' + e.error;
+        }
       };
 
       recog.onend = () => {
         isListening = false;
         document.getElementById('aiMicBtn').classList.remove('listening');
+        if (voiceSilenceTimer) clearTimeout(voiceSilenceTimer);
+        // Nếu vừa kết thúc và có câu lệnh chưa gửi
+        if (accumulatedFinal.trim() && !isSubmitting) {
+          isSubmitting = true;
+          handleVoiceCommand(accumulatedFinal.trim());
+          accumulatedFinal = '';
+        }
       };
 
       return recog;
@@ -2867,8 +2911,9 @@
     }
 
     function stopVoiceAssistant() {
+      if (voiceSilenceTimer) clearTimeout(voiceSilenceTimer);
       if (voiceRecognition && isListening) {
-        voiceRecognition.stop();
+        try { voiceRecognition.stop(); } catch(e){}
       }
       isListening = false;
       document.getElementById('aiMicBtn').classList.remove('listening');
@@ -2879,6 +2924,15 @@
       if (e.target.id === 'aiModal') {
         stopVoiceAssistant();
       }
+    }
+
+    function submitManualAiCommand() {
+      const inp = document.getElementById('aiManualInput');
+      const val = (inp ? inp.value : '') || accumulatedFinal || '';
+      if (!val.trim()) return;
+      isSubmitting = true;
+      stopVoiceAssistant();
+      handleVoiceCommand(val.trim());
     }
 
     async function handleVoiceCommand(commandText) {
