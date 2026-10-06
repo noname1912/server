@@ -573,12 +573,12 @@ def stream_audio(platform: str, song_id: str):
         proc = _active_transcodes.get(cache_key)
 
     def generate_progressive(tmp_p=tmp_mp3, p=proc, final_p=final_mp3):
-        # Chờ tối đa 12 giây cho tới khi có ít nhất 4KB dữ liệu (~300ms nhạc)
+        # Chờ tối đa 15 giây cho tới khi có ít nhất 64KB dữ liệu (~4s nhạc) để đệm ban đầu thật dày chống giật
         t0 = time.time()
         curr_file = None
-        while time.time() - t0 < 12.0:
+        while time.time() - t0 < 15.0:
             target = final_p if final_p.exists() else tmp_p
-            if target.exists() and target.stat().st_size >= 4096:
+            if target.exists() and target.stat().st_size >= 65536:
                 curr_file = target
                 break
             if p and p.poll() is not None:
@@ -588,7 +588,7 @@ def stream_audio(platform: str, song_id: str):
                     break
                 print("[Stream] Transcode failed or produced empty file")
                 return
-            time.sleep(0.04)
+            time.sleep(0.05)
 
         if not curr_file or not curr_file.exists():
             print("[Stream] Timeout chờ file tmp_mp3 xuất hiện")
@@ -597,18 +597,18 @@ def stream_audio(platform: str, song_id: str):
         try:
             with open(curr_file, "rb") as f:
                 while True:
-                    chunk = f.read(8192)
+                    chunk = f.read(16384)
                     if chunk:
                         yield chunk
                     else:
                         if p and p.poll() is not None:
                             while True:
-                                rem = f.read(8192)
+                                rem = f.read(16384)
                                 if not rem:
                                     break
                                 yield rem
                             break
-                        time.sleep(0.02)
+                        time.sleep(0.05)
         except Exception:
             pass
 
