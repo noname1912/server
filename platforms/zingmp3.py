@@ -11,13 +11,27 @@ _YDL_SEARCH_OPTS = {
     "no_warnings":    True,
     "extract_flat":   True,
     "playlist_items": "1:20",
+    "socket_timeout": 8,
+    "retries":        2,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"]
+        }
+    },
 }
 
 _YDL_STREAM_OPTS = {
-    "quiet":       True,
-    "no_warnings": True,
-    "format":      "bestaudio[ext=m4a]/140/bestaudio[acodec^=mp4a]/bestaudio[ext=mp3]/bestaudio",
-    "noplaylist":  True,
+    "quiet":          True,
+    "no_warnings":    True,
+    "format":         "bestaudio[ext=m4a]/140/bestaudio[acodec^=mp4a]/bestaudio[ext=mp3]/bestaudio",
+    "noplaylist":     True,
+    "socket_timeout": 10,
+    "retries":        3,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "web"]
+        }
+    },
 }
 
 
