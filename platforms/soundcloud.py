@@ -10,23 +10,24 @@ import urllib.parse
 import yt_dlp
 
 _YDL_SEARCH_OPTS = {
-    "quiet":        True,
-    "no_warnings":  True,
-    "extract_flat": True,
+    "quiet":          True,
+    "no_warnings":    True,
+    "extract_flat":   True,
     "playlist_items": "1:20",
-    "sleep_interval": 0.5,
+    "socket_timeout": 8,
+    "retries":        2,
 }
 
 _YDL_STREAM_OPTS = {
-    "quiet":         True,
-    "no_warnings":   True,
-    "format":        "bestaudio[ext=mp3]/bestaudio[abr<=128]/bestaudio",
-    "noplaylist":    True,
-    "retries":       3,
-    "sleep_interval": 1,
+    "quiet":          True,
+    "no_warnings":    True,
+    "format":         "bestaudio[ext=mp3]/bestaudio[abr<=128]/bestaudio",
+    "noplaylist":     True,
+    "retries":        3,
+    "socket_timeout": 10,
 }
 
-_sc_client_id = "Pb72ranhoyt6gw7hM7TkzUItXlMWSNSo"
+_sc_client_id = "F4NBFDqtGCLXXsV1EvDyDg27XXRYDdKh"
 _sc_client_id_exp = 0
 
 def _get_sc_client_id() -> str:
@@ -51,7 +52,7 @@ def _get_sc_client_id() -> str:
                 pass
     except Exception as ex:
         print(f"[SoundCloud] get client_id error: {ex}")
-    return _sc_client_id or "Pb72ranhoyt6gw7hM7TkzUItXlMWSNSo"
+    return _sc_client_id or "F4NBFDqtGCLXXsV1EvDyDg27XXRYDdKh"
 
 
 class SoundCloudPlatform:
@@ -63,7 +64,45 @@ class SoundCloudPlatform:
 
     # ── Search ────────────────────────────────────────────────
     def search(self, query: str, limit: int = 20) -> list[dict]:
-        """Tìm kiếm bài hát trên SoundCloud."""
+        """Tìm kiếm bài hát trên SoundCloud (API v2 trực tiếp ~0.3s, fallback yt-dlp)."""
+        # 1. Thử gọi trực tiếp SoundCloud API v2 (siêu nhanh)
+        cid = _get_sc_client_id()
+        if cid:
+            try:
+                url = f"https://api-v2.soundcloud.com/search/tracks?q={urllib.parse.quote(query)}&client_id={cid}&limit={limit}"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=6) as res:
+                    data = json.loads(res.read().decode("utf-8"))
+                tracks = data.get("collection", [])
+                results = []
+                for t in tracks:
+                    if not t or not isinstance(t, dict):
+                        continue
+                    tid = str(t.get("id", ""))
+                    if not tid:
+                        continue
+                    title = t.get("title") or t.get("permalink") or "SoundCloud Track"
+                    user = t.get("user") or {}
+                    artist = user.get("username") or "SoundCloud"
+                    dur_ms = t.get("duration") or 0
+                    dur_sec = int(dur_ms // 1000)
+                    artwork = t.get("artwork_url") or user.get("avatar_url") or ""
+                    if artwork and "-large" in artwork:
+                        artwork = artwork.replace("-large", "-t300x300")
+                    results.append({
+                        "id":        tid,
+                        "title":     title,
+                        "artist":    artist,
+                        "duration":  dur_sec,
+                        "platform":  "soundcloud",
+                        "thumbnail": artwork,
+                    })
+                if results:
+                    return results[:limit]
+            except Exception as ex_v2:
+                print(f"[SoundCloud] Direct API v2 search error ({ex_v2}), falling back to yt-dlp...")
+
+        # 2. Fallback sang yt-dlp nếu API v2 bị lỗi
         search_url = f"scsearch{limit}:{query}"
         results = []
         try:
@@ -73,7 +112,6 @@ class SoundCloudPlatform:
                 for e in entries:
                     if not e:
                         continue
-                    # Lấy numeric track ID từ URL hoặc ID field
                     track_id = _extract_sc_id(e)
                     if not track_id:
                         continue
