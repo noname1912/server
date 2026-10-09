@@ -136,7 +136,7 @@ class YouTubePlatform:
         return results[:limit]
 
     # ── Stream URL ────────────────────────────────────────────
-    def get_stream_url(self, song_id: str) -> str | None:
+    def get_stream_url(self, song_id: str):
         """
         song_id là YouTube video ID (e.g. 'dQw4w9WgXcQ').
         Trả về URL audio stream.

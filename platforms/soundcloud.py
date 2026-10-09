@@ -232,7 +232,7 @@ class SoundCloudPlatform:
         return results
 
     # ── Stream URL ────────────────────────────────────────────
-    def get_stream_url(self, song_id: str) -> str | None:
+    def get_stream_url(self, song_id: str):
         """
         song_id: numeric track ID (e.g. '1581837499')
                  hoặc full URL (e.g. 'https://soundcloud.com/...')

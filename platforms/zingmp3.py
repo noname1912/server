@@ -143,7 +143,7 @@ class ZingMP3Platform:
         return results[:limit]
 
     # ── Stream URL ────────────────────────────────────────────
-    def get_stream_url(self, song_id: str) -> str | None:
+    def get_stream_url(self, song_id: str):
         """
         song_id: YouTube video ID (vì ZingMP3 dùng YouTube làm backend)
         """
