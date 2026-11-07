@@ -996,7 +996,7 @@ def stream_audio(platform: str, song_id: str):
             direct_passthrough=True,
         )
 
-    # 3B. NẾU LÀ HLS / YOUTUBE -> FFMPEG PIPE LOW-LATENCY (Buffer 2KB)
+    # 3B. NẾU LÀ HLS / YOUTUBE -> FFMPEG PIPE CHUẨN XÁC 100%
     headers_str = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
     ref = _get_referer(platform)
     if ref:
@@ -1006,13 +1006,8 @@ def stream_audio(platform: str, song_id: str):
         "ffmpeg",
         "-y",
         "-loglevel", "error",
-        "-rw_timeout", "15000000",
     ]
-    if is_m3u8:
-        cmd.extend([
-            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
-        ])
-    else:
+    if not is_m3u8:
         cmd.extend([
             "-reconnect", "1",
             "-reconnect_streamed", "1",
@@ -1043,40 +1038,13 @@ def stream_audio(platform: str, song_id: str):
             pass
 
         proc = None
-        first_chunk = True
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=4096)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32768)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             while True:
-                chunk = proc.stdout.read(2048)
+                chunk = proc.stdout.read(8192)
                 if not chunk:
-                    if first_chunk:
-                        print(f"[Stream-Pipe] Warning: First chunk is empty for {cache_key}! Invalidating cache and retrying...")
-                        _del_stream_cache(cache_key)
-                        try:
-                            fresh_url = PLATFORMS[platform].get_stream_url(song_id)
-                            if fresh_url and fresh_url != audio_url:
-                                print(f"[Stream-Pipe] Retrying with fresh URL for {cache_key}")
-                                _set_stream_cache(cache_key, fresh_url)
-                                retry_cmd = list(cmd)
-                                for idx_c, arg_c in enumerate(retry_cmd):
-                                    if arg_c == audio_url:
-                                        retry_cmd[idx_c] = fresh_url
-                                        break
-                                proc_retry = subprocess.Popen(retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=4096)
-                                proc = proc_retry
-                                while True:
-                                    chunk_r = proc.stdout.read(2048)
-                                    if not chunk_r:
-                                        break
-                                    if f_cache:
-                                        try: f_cache.write(chunk_r)
-                                        except Exception: pass
-                                    yield chunk_r
-                        except Exception as ex_retry:
-                            print(f"[Stream-Pipe] Retry error: {ex_retry}")
                     break
-                first_chunk = False
                 if f_cache:
                     try: f_cache.write(chunk)
                     except Exception: pass
@@ -2450,7 +2418,7 @@ def get_wallpaper_info():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "version": "2.6-instant"})
+    return jsonify({"status": "ok", "version": "2.7-stable"})
 
 
 @app.route("/api/cache/clear", methods=["GET", "POST"])

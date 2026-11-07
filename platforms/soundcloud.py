@@ -317,13 +317,13 @@ class SoundCloudPlatform:
                 with urllib.request.urlopen(t_req, timeout=5) as t_res:
                     t_data = json.loads(t_res.read().decode("utf-8"))
                 trans = t_data.get("media", {}).get("transcodings", [])
-                # Sắp xếp ưu tiên: 1. progressive (mp3), 2. hls audio/mp4 (fMP4 aac), 3. các protocol khác
+                # Sắp xếp ưu tiên: 1. progressive (mp3), 2. audio/mpeg (mp3 HLS), 3. audio/mp4 (fMP4 aac)
                 def _trans_score(x):
                     proto = (x.get("format", {}).get("protocol") or "").lower()
                     mime = (x.get("format", {}).get("mime_type") or "").lower()
                     if proto == "progressive": return 100
-                    if "mp4" in mime: return 80
-                    if "mpeg" in mime: return 20
+                    if "mpeg" in mime: return 80
+                    if "mp4" in mime: return 20
                     return 50
                 sorted_trans = sorted(trans, key=_trans_score, reverse=True)
                 for target in sorted_trans:
