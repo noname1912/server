@@ -752,6 +752,40 @@ def stream_audio(platform: str, song_id: str):
         return send_file(str(final_mp3), mimetype="audio/mpeg", conditional=True)
 
     # 2. NẾU CHƯA CÓ TRONG CACHE:
+    # Với SoundCloud, stream URL đã là MP3 128kbps chuẩn, phát thẳng qua proxy trong 0.1s không cần qua FFmpeg
+    if platform == "soundcloud":
+        cache_key = f"{platform}:{song_id}"
+        with _cache_lock:
+            audio_url = _stream_cache.get(cache_key)
+        if not audio_url:
+            audio_url = PLATFORMS["soundcloud"].get_stream_url(song_id)
+            if audio_url:
+                with _cache_lock:
+                    _stream_cache[cache_key] = audio_url
+        if audio_url:
+            print(f"[Stream] Instant direct SoundCloud proxy: {song_id}")
+            def generate_sc():
+                req = urllib.request.Request(
+                    audio_url,
+                    headers={"User-Agent": "Mozilla/5.0", "Referer": "https://soundcloud.com/"}
+                )
+                with urllib.request.urlopen(req, timeout=8) as sc_resp:
+                    while True:
+                        buf = sc_resp.read(8192)
+                        if not buf: break
+                        yield buf
+            return Response(
+                stream_with_context(generate_sc()),
+                status=200,
+                headers={
+                    "Content-Type": "audio/mpeg",
+                    "Cache-Control": "no-cache",
+                    "Accept-Ranges": "none",
+                    "Access-Control-Allow-Origin": "*",
+                },
+                direct_passthrough=True
+            )
+
     # Lấy stream URL gốc
     cache_key = f"{platform}:{song_id}"
     with _cache_lock:
@@ -780,7 +814,7 @@ def stream_audio(platform: str, song_id: str):
         curr_file = None
         while time.time() - t0 < 15.0:
             target = final_p if final_p.exists() else tmp_p
-            if target.exists() and target.stat().st_size >= 65536:
+            if target.exists() and target.stat().st_size >= 4096:
                 curr_file = target
                 break
             if p and p.poll() is not None:
@@ -1111,29 +1145,6 @@ def player_play():
     else:
         safe_id = song_id
 
-    # Giữ lại URL hợp lệ trong cache nếu có để phát ngay lập tức
-    fresh_url = None
-    with _cache_lock:
-        fresh_url = _stream_cache.get(f"{platform}:{song_id}") or _stream_cache.get(f"{platform}:{safe_id}")
-
-    if not fresh_url:
-        try:
-            p_obj = PLATFORMS.get(platform)
-            if p_obj and hasattr(p_obj, "get_stream_url"):
-                fresh_url = p_obj.get_stream_url(song_id)
-                if fresh_url:
-                    with _cache_lock:
-                        _stream_cache[f"{platform}:{song_id}"] = fresh_url
-                        _stream_cache[f"{platform}:{safe_id}"] = fresh_url
-                    print(f"[PlayerHub] Pre-resolved stream URL for {platform}:{song_id}")
-        except Exception as ex_pw:
-            print(f"[PlayerHub] Resolve stream URL error: {ex_pw}")
-
-    if fresh_url:
-        _start_transcode_background(platform, song_id, fresh_url)
-        if safe_id != song_id:
-            _start_transcode_background(platform, safe_id, fresh_url)
-
     song_info = {
         "id": song_id,
         "platform": platform,
@@ -1143,6 +1154,7 @@ def player_play():
         "duration": int(data.get("duration", 0)),
     }
 
+    # Cập nhật trạng thái phát ngay lập tức (0ms) để ESP32 Loa nhận lệnh không bị trễ 10-20s
     with _player_lock:
         global _playlist, _playlist_idx
         for i, s in enumerate(_playlist):
@@ -1158,6 +1170,29 @@ def player_play():
         _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
         _player_state["song"] = song_info
         _player_state["elapsed"] = 0
+
+    # Kích hoạt phân giải stream & transcode ngầm song song (Background) không làm nghẽn phản hồi
+    def _bg_prewarm():
+        try:
+            fresh_url = None
+            with _cache_lock:
+                fresh_url = _stream_cache.get(f"{platform}:{song_id}") or _stream_cache.get(f"{platform}:{safe_id}")
+            if not fresh_url:
+                p_obj = PLATFORMS.get(platform)
+                if p_obj and hasattr(p_obj, "get_stream_url"):
+                    fresh_url = p_obj.get_stream_url(song_id)
+                    if fresh_url:
+                        with _cache_lock:
+                            _stream_cache[f"{platform}:{song_id}"] = fresh_url
+                            _stream_cache[f"{platform}:{safe_id}"] = fresh_url
+            if fresh_url and platform != "soundcloud":
+                _start_transcode_background(platform, song_id, fresh_url)
+                if safe_id != song_id:
+                    _start_transcode_background(platform, safe_id, fresh_url)
+        except Exception as ex_pw:
+            print(f"[PlayerHub] BG Prewarm error: {ex_pw}")
+
+    threading.Thread(target=_bg_prewarm, daemon=True).start()
 
     try:
         db.add_play_history(song_info)
