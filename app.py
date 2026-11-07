@@ -113,8 +113,8 @@ def search():
         with _player_lock:
             _playlist = list(results)
             _playlist_idx = 0
-        _attach_b64_thumbs(results, 10, 32)
         _set_cache(cache_key, results)
+        _prewarm_thumbs(results, 32, sync_count=5)
         return jsonify(results)
     except Exception as e:
         print(f"[Search] Error: {e}")
@@ -393,7 +393,6 @@ def get_favorites():
     Trả về danh sách các bài hát yêu thích đã lưu trong CSDL SQLite
     """
     favs = db.get_favorites()
-    _attach_b64_thumbs(favs, 10, 32)
     return jsonify(favs)
 
 
@@ -446,8 +445,8 @@ def trending():
 
     try:
         results = PLATFORMS[platform].get_trending(limit=20)
-        _attach_b64_thumbs(results, 10, 32)
         _set_cache(cache_key, results)
+        _prewarm_thumbs(results, 32, sync_count=5)
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -627,7 +626,6 @@ def recommendations():
 
         final_songs = collected_songs[:limit]
 
-        _attach_b64_thumbs(final_songs, 10, 32)
         res_payload = {
             "status": "ok",
             "platform": platform,
@@ -636,6 +634,7 @@ def recommendations():
             "songs": final_songs
         }
         _set_cache(cache_key, res_payload)
+        _prewarm_thumbs(final_songs, 32, sync_count=5)
         return jsonify(res_payload)
     except Exception as e:
         print(f"[Recommendations] Error: {e}")
@@ -1060,23 +1059,38 @@ def _prewarm_thumbs(song_list, size=32, sync_count=5):
         threading.Thread(target=_bg_worker, daemon=True).start()
 
 
-def _attach_b64_thumbs(song_list, max_count=10, size=32):
+@app.route("/api/thumbnails_batch", methods=["GET", "POST"])
+def thumbnails_batch():
     """
-    Tải trước và đính kèm thumbnail base64 RGB565 trực tiếp vào danh sách bài hát.
-    ESP32 nhận được cả thông tin bài hát VÀ ảnh cùng một lúc, không cần gọi thêm HTTP!
+    Tải gộp toàn bộ thumbnail của các bài trên màn hình trong 1 HTTP request duy nhất (150ms).
+    Body JSON hoặc query: urls = [url1, url2, ...], size=32
+    Trả về raw bytes: N khối dữ liệu (mỗi khối = size * size * 2 bytes).
+    ESP32 đọc liên tục 2048 bytes mỗi ảnh và vẽ thẳng lên TFT!
     """
-    if not song_list:
-        return
-    import base64
-    count = min(len(song_list), max_count)
-    _prewarm_thumbs(song_list, size, sync_count=count)
-    for s in song_list[:count]:
-        if isinstance(s, dict):
-            u = s.get("thumbnail") or ""
-            if u:
-                raw_rgb565 = _download_and_cache_thumbnail(u, size)
-                if raw_rgb565:
-                    s["thumb_b64"] = base64.b64encode(raw_rgb565).decode("ascii")
+    if request.method == "POST":
+        data = request.get_json(force=True, silent=True) or {}
+        urls = data.get("urls", [])
+        size = int(data.get("size", 32))
+    else:
+        urls_str = request.args.get("urls", "")
+        urls = [u.strip() for u in urls_str.split("|")]
+        size = int(request.args.get("size", 32))
+
+    size = max(16, min(size, 80))
+    block_len = size * size * 2
+
+    out = bytearray()
+    for u in urls:
+        plat_hint = "soundcloud" if ("sndcdn" in u or "soundcloud" in u) else ("zing" if "zing" in u else "youtube")
+        raw_rgb = _download_and_cache_thumbnail(u, size) if u else None
+        if raw_rgb and len(raw_rgb) == block_len:
+            out.extend(raw_rgb)
+        else:
+            fallback = _make_fallback_rgb565(size, plat_hint)
+            out.extend(fallback)
+
+    return Response(bytes(out), status=200, mimetype="application/octet-stream",
+                    headers={"Content-Length": str(len(out)), "X-Count": str(len(urls))})
 
 
 @app.route("/api/thumbnail")
@@ -1451,7 +1465,6 @@ def player_queue_clear():
 def get_history():
     """GET /api/history -> Trả về tối đa 20 bài hát đã nghe gần nhất."""
     history = db.get_play_history(limit=20)
-    _attach_b64_thumbs(history, 10, 32)
     return jsonify(history)
 
 
