@@ -632,6 +632,7 @@ def recommendations():
             "songs": final_songs
         }
         _set_cache(cache_key, res_payload)
+        _prewarm_thumbs(final_songs, 32)
         return jsonify(res_payload)
     except Exception as e:
         print(f"[Recommendations] Error: {e}")
@@ -978,7 +979,7 @@ def thumbnail():
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Referer": "https://soundcloud.com/",
                     "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-                }, timeout=1.5, verify=False)
+                }, timeout=2.5, verify=False)
                 if r.status_code == 200 and len(r.content) > 100:
                     raw = r.content
             except Exception:
@@ -1083,6 +1084,49 @@ def thumbnail():
                         headers={"X-Width": str(size), "X-Height": str(size),
                                  "Content-Length": str(len(fallback))})
 
+
+
+def _prewarm_thumbs(song_list, size=32):
+    def _worker():
+        for s in (song_list or []):
+            try:
+                u = s.get("thumbnail") if isinstance(s, dict) else ""
+                if u and u.startswith("http"):
+                    cache_key = f"{u}:{size}"
+                    with _thumb_lock:
+                        if cache_key in _thumb_cache:
+                            continue
+                    try:
+                        r = requests.get(u, headers={
+                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                            "Referer": "https://soundcloud.com/",
+                            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                        }, timeout=3.0, verify=False)
+                        if r.status_code == 200 and len(r.content) > 100:
+                            img = Image.open(BytesIO(r.content)).convert("RGB")
+                            w, h = img.size
+                            min_dim = min(w, h)
+                            left = (w - min_dim) // 2
+                            top = (h - min_dim) // 2
+                            img = img.crop((left, top, left + min_dim, top + min_dim)).resize((size, size), _LANCZOS)
+                            raw_rgb = img.tobytes()
+                            buf = bytearray(size * size * 2)
+                            idx = 0
+                            for i in range(size * size):
+                                r_c = raw_rgb[i * 3]
+                                g_c = raw_rgb[i * 3 + 1]
+                                b_c = raw_rgb[i * 3 + 2]
+                                rgb565 = ((r_c & 0xF8) << 8) | ((g_c & 0xFC) << 3) | (b_c >> 3)
+                                buf[idx] = (rgb565 >> 8) & 0xFF
+                                buf[idx + 1] = rgb565 & 0xFF
+                                idx += 2
+                            with _thumb_lock:
+                                _thumb_cache[cache_key] = bytes(buf)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    threading.Thread(target=_worker, daemon=True).start()
 
 # ─── Platforms Info ──────────────────────────────────────────────
 
