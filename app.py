@@ -583,25 +583,25 @@ def recommendations():
                 return []
 
         if platform in PLATFORMS:
-            # Lấy đa dạng nguồn song song trong 1.2s:
+            # Lấy đa dạng nguồn song song trong 3.0s:
             # 1. Bài theo primary_q (gu nghệ sĩ/thể loại)
             # 2. Bài theo secondary_q (thể loại hot khác hoặc nghệ sĩ 2 hoặc "Top Hot TikTok")
             # 3. Bài theo trending thịnh hành
             sec_q = search_queries[1] if len(search_queries) > 1 else (top_genres[0] if top_genres else "Hot V-Pop")
             executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
             try:
-                f_pri = executor.submit(_fetch_plat_songs, platform, primary_q, 6)
-                f_sec = executor.submit(_fetch_plat_songs, platform, sec_q, 6)
-                f_trd = executor.submit(lambda: PLATFORMS[platform].get_trending(limit=6))
+                f_pri = executor.submit(_fetch_plat_songs, platform, primary_q, 8)
+                f_sec = executor.submit(_fetch_plat_songs, platform, sec_q, 8)
+                f_trd = executor.submit(lambda: PLATFORMS[platform].get_trending(limit=8))
 
                 pri_songs = []
                 sec_songs = []
                 trd_songs = []
-                try: pri_songs = f_pri.result(timeout=1.2) or []
+                try: pri_songs = f_pri.result(timeout=3.0) or []
                 except Exception: pass
-                try: sec_songs = f_sec.result(timeout=1.2) or []
+                try: sec_songs = f_sec.result(timeout=3.0) or []
                 except Exception: pass
-                try: trd_songs = f_trd.result(timeout=1.2) or []
+                try: trd_songs = f_trd.result(timeout=3.0) or []
                 except Exception: pass
 
                 # Đa dạng hóa: Giới hạn tối đa 2 bài trên 1 nghệ sĩ để danh sách không bị trùng lặp
@@ -642,6 +642,22 @@ def recommendations():
                             seen_titles.add(stitle)
                             s["rec_reason"] = reas
                             collected_songs.append(s)
+
+                # Fallback an toàn: nếu vẫn chưa đủ 10 bài, lấy thêm từ trending chung
+                if len(collected_songs) < limit:
+                    try:
+                        extra_trending = PLATFORMS[platform].get_trending(limit=15)
+                        for s in extra_trending:
+                            if len(collected_songs) >= limit: break
+                            sid = str(s.get("id"))
+                            stitle = (s.get("title") or "").strip().lower()
+                            if sid not in seen_ids and stitle not in seen_titles:
+                                seen_ids.add(sid)
+                                seen_titles.add(stitle)
+                                s["rec_reason"] = "Thịnh hành"
+                                collected_songs.append(s)
+                    except Exception:
+                        pass
             finally:
                 executor.shutdown(wait=False, cancel_futures=True)
         else:
@@ -2375,7 +2391,7 @@ def get_wallpaper_info():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "version": "2.3-ultrafast"})
+    return jsonify({"status": "ok", "version": "2.4-stable"})
 
 
 @app.route("/api/debug/log")
