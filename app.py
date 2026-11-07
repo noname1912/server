@@ -26,6 +26,20 @@ _NEAREST = getattr(getattr(Image, 'Resampling', Image), 'NEAREST', 0)
 from platforms import PLATFORMS
 import db
 
+# ─── High-Performance Server In-Memory Cache (0ms Instant Response) ──
+_SERVER_CACHE = {}  # key -> (timestamp, data)
+def _get_cache(key, max_age_sec=120):
+    now = time.time()
+    if key in _SERVER_CACHE:
+        ts, data = _SERVER_CACHE[key]
+        if now - ts < max_age_sec:
+            return data
+    return None
+
+def _set_cache(key, data):
+    _SERVER_CACHE[key] = (time.time(), data)
+
+
 app = Flask(__name__)
 CORS(app)
 db.init_db()
@@ -75,6 +89,15 @@ def search():
     except Exception as dbe:
         print(f"[Search] DB history error: {dbe}")
 
+    cache_key = f"search:{platform}:{stype}:{q.lower()}:{limit}"
+    cached_res = _get_cache(cache_key, 120)
+    if cached_res is not None:
+        global _playlist, _playlist_idx
+        with _player_lock:
+            _playlist = list(cached_res)
+            _playlist_idx = 0
+        return jsonify(cached_res)
+
     try:
         plat_obj = PLATFORMS[platform]
         if stype == "playlist" and hasattr(plat_obj, "search_playlists"):
@@ -82,14 +105,15 @@ def search():
             for r in results:
                 r["title"] = db.to_ascii_simple(r.get("title", ""))
                 r["artist"] = db.to_ascii_simple(r.get("artist", ""))
+            _set_cache(cache_key, results)
             return jsonify(results)
 
         results = plat_obj.search(q, limit=limit)
         # Lưu kết quả tìm kiếm vào danh sách phát (Playlist) để tự động Next bài
-        global _playlist, _playlist_idx
         with _player_lock:
             _playlist = list(results)
             _playlist_idx = 0
+        _set_cache(cache_key, results)
         return jsonify(results)
     except Exception as e:
         print(f"[Search] Error: {e}")
@@ -407,13 +431,20 @@ def toggle_favorite():
 def trending():
     """
     GET /api/trending?platform=<zing|soundcloud|youtube>
-    Trả về danh sách bài trending.
+    Trả về danh sách bài trending (Cached 300s).
     """
     platform = request.args.get("platform", "zing").lower()
     if platform not in PLATFORMS:
         return jsonify({"error": "Unknown platform"}), 400
+    
+    cache_key = f"trending:{platform}"
+    cached = _get_cache(cache_key, 300)
+    if cached is not None:
+        return jsonify(cached)
+
     try:
         results = PLATFORMS[platform].get_trending(limit=20)
+        _set_cache(cache_key, results)
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -538,12 +569,30 @@ def recommendations():
                         collected_songs.append(s)
                 except Exception: pass
         else:
-            # Tất cả nền tảng: chạy song song (Parallel) 3 nền tảng trong 0.25s
+            # Tất cả nền tảng: chạy song song 3 nền tảng với timeout 2.0s
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
                 f_yt = executor.submit(_fetch_plat_songs, "youtube", primary_q, 4)
                 f_zg = executor.submit(_fetch_plat_songs, "zing", primary_q, 3)
                 f_sc = executor.submit(_fetch_plat_songs, "soundcloud", primary_q, 3)
-                for s in (f_yt.result() + f_zg.result() + f_sc.result()):
+                
+                done, not_done = concurrent.futures.wait([f_yt, f_zg, f_sc], timeout=2.0)
+                results_all = []
+                for f in [f_yt, f_zg, f_sc]:
+                    if f in done:
+                        try:
+                            results_all.extend(f.result())
+                        except Exception:
+                            pass
+                
+                # Bổ sung nếu thiếu bài do mạng chậm
+                if len(results_all) < limit:
+                    try:
+                        extra = PLATFORMS["youtube"].search(f"{primary_q} hay nhat", limit=limit - len(results_all))
+                        results_all.extend(extra)
+                    except Exception:
+                        pass
+                
+                for s in results_all:
                     s["rec_reason"] = f"Theo gu: {primary_q}"
                     collected_songs.append(s)
 

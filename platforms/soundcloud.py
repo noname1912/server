@@ -28,21 +28,66 @@ _YDL_STREAM_OPTS = {
 }
 
 _SC_CLIENT_IDS = [
+    "39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ",
+    "b45b1e1079f42ab666772d8a886b6634",
     "a3e059563d7fd3372b49b37f00a00bcf",
-    "F4NBFDqtGCLXXsV1EvDyDg27XXRYDdKh",
-    "2t9loNfh0ekOfjqqeO5dNuRIapxcjmgz",
-    "iZIs9mchVcX5lhVR1EzGCddqqbfGW19z",
-    "b45b1e1079f42ab666772d8a886b6634"
 ]
 _sc_cid_idx = 0
 _sc_client_id = _SC_CLIENT_IDS[0]
+_last_scrape_time = 0
+_sc_cache = {}  # query: (timestamp, results)
+
+def _scrape_fresh_client_id() -> str:
+    """Tự động cào client_id mới nhất từ assets JS của soundcloud.com khi token cũ bị 401."""
+    global _sc_client_id, _last_scrape_time, _SC_CLIENT_IDS
+    now = time.time()
+    if now - _last_scrape_time < 30 and _sc_client_id:
+        return _sc_client_id
+    _last_scrape_time = now
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    }
+    try:
+        req = urllib.request.Request("https://soundcloud.com", headers=headers)
+        with urllib.request.urlopen(req, timeout=4) as res:
+            html = res.read().decode("utf-8", errors="ignore")
+        scripts = re.findall(r'<script[^>]+src="([^">]+)"', html)
+        js_urls = [s for s in scripts if s.endswith(".js")]
+        for url in reversed(js_urls):
+            try:
+                req_js = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req_js, timeout=3) as js_res:
+                    js_text = js_res.read().decode("utf-8", errors="ignore")
+                cids = re.findall(r'client_id[:=]["\']([a-zA-Z0-9]{32})["\']', js_text)
+                if not cids:
+                    cids = re.findall(r'client_id["\']\s*:\s*["\']([a-zA-Z0-9]{32})["\']', js_text)
+                if not cids:
+                    cids = re.findall(r'client_id=([a-zA-Z0-9]{32})', js_text)
+                if cids:
+                    fresh_cid = cids[0]
+                    print(f"[SoundCloud] Auto-scraped fresh client_id: {fresh_cid}")
+                    _sc_client_id = fresh_cid
+                    if fresh_cid not in _SC_CLIENT_IDS:
+                        _SC_CLIENT_IDS.insert(0, fresh_cid)
+                    return fresh_cid
+            except Exception:
+                continue
+    except Exception as e:
+        print(f"[SoundCloud] Scrape fresh client_id failed: {e}")
+    return _sc_client_id
 
 def _get_sc_client_id() -> str:
     global _sc_client_id
+    if not _sc_client_id:
+        return _scrape_fresh_client_id()
     return _sc_client_id
 
 def _rotate_sc_client_id():
     global _sc_client_id, _sc_cid_idx
+    new_cid = _scrape_fresh_client_id()
+    if new_cid and new_cid != _sc_client_id:
+        _sc_client_id = new_cid
+        return _sc_client_id
     _sc_cid_idx = (_sc_cid_idx + 1) % len(_SC_CLIENT_IDS)
     _sc_client_id = _SC_CLIENT_IDS[_sc_cid_idx]
     print(f"[SoundCloud] Rotated to client_id: {_sc_client_id}")
@@ -59,6 +104,13 @@ class SoundCloudPlatform:
     # ── Search ────────────────────────────────────────────────
     def search(self, query: str, limit: int = 20) -> list[dict]:
         """Tìm kiếm bài hát trên SoundCloud (API v2 trực tiếp ~0.2s, fallback yt-dlp)."""
+        cache_key = f"{query.strip().lower()}:{limit}"
+        now = time.time()
+        if cache_key in _sc_cache:
+            ts, cached_res = _sc_cache[cache_key]
+            if now - ts < 300:  # 5 phút cache
+                return list(cached_res)
+
         # 1. Thử gọi trực tiếp SoundCloud API v2 với danh sách client_id sẵn sàng
         for attempt in range(len(_SC_CLIENT_IDS)):
             cid = _get_sc_client_id()
@@ -92,6 +144,7 @@ class SoundCloudPlatform:
                         "thumbnail": artwork,
                     })
                 if results:
+                    _sc_cache[cache_key] = (now, results[:limit])
                     return results[:limit]
             except urllib.error.HTTPError as he:
                 if he.code in (401, 403):
