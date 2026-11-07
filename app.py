@@ -19,6 +19,10 @@ from flask import (Flask, jsonify, request, render_template,
 from flask_cors import CORS
 from PIL import Image, ImageEnhance, ImageOps
 
+# Tuong thich tat ca cac phien ban Pillow (ca Pillow 8.x tren Python 3.9 va Pillow 9.x+ tren Python 3.10+)
+_LANCZOS = getattr(getattr(Image, 'Resampling', Image), 'LANCZOS', getattr(Image, 'ANTIALIAS', 1))
+_NEAREST = getattr(getattr(Image, 'Resampling', Image), 'NEAREST', 0)
+
 from platforms import PLATFORMS
 import db
 
@@ -415,6 +419,155 @@ def trending():
         return jsonify({"error": str(e)}), 500
 
 
+# ─── Đề xuất 10 bài hát theo gu nghe nhạc cá nhân ───────────────
+
+@app.route("/api/recommendations")
+def recommendations():
+    """
+    GET /api/recommendations?platform=<all|youtube|zing|soundcloud>&limit=10
+    Phân tích lịch sử nghe nhạc, bài hát yêu thích và tìm kiếm để đề xuất 10 bài hát phù hợp phong cách.
+    """
+    platform = request.args.get("platform", "all").lower()
+    limit = int(request.args.get("limit", 10))
+
+    try:
+        from collections import Counter
+        history = db.get_play_history(30)
+        favorites = db.get_favorites()
+        searches = db.get_recent_searches(10)
+
+        GENRE_KEYWORDS = [
+            "remix", "vinahouse", "lofi", "chill", "acoustic", "ballad",
+            "rap", "hip hop", "edm", "pop", "bolero", "cover", "tiktok",
+            "indie", "dance", "nhac tre", "nhạc trẻ", "vpop"
+        ]
+
+        artist_counts = Counter()
+        genre_counts = Counter()
+
+        for s in history:
+            a = (s.get("artist") or "").strip()
+            if a and a.lower() not in ("unknown", "nhieu ca si", "nhiều ca sĩ", "various artists", "various"):
+                artist_counts[a] += 1
+            t = (s.get("title") or "").lower()
+            for g in GENRE_KEYWORDS:
+                if g in t:
+                    genre_counts[g] += 1
+
+        for s in favorites:
+            a = (s.get("artist") or "").strip()
+            if a and a.lower() not in ("unknown", "nhieu ca si", "nhiều ca sĩ", "various artists", "various"):
+                artist_counts[a] += 2
+            t = (s.get("title") or "").lower()
+            for g in GENRE_KEYWORDS:
+                if g in t:
+                    genre_counts[g] += 2
+
+        for q in searches:
+            ql = q.lower()
+            matched = False
+            for g in GENRE_KEYWORDS:
+                if g in ql:
+                    genre_counts[g] += 2
+                    matched = True
+            if not matched and len(q.strip()) > 2:
+                artist_counts[q.strip()] += 2
+
+        top_artists = [a for a, _ in artist_counts.most_common(3)]
+        top_genres = [g for g, _ in genre_counts.most_common(2)]
+
+        taste_parts = []
+        if top_artists:
+            taste_parts.append(", ".join(top_artists[:2]))
+        if top_genres:
+            taste_parts.append(", ".join([g.title() for g in top_genres]))
+        taste_summary = " • ".join(taste_parts) if taste_parts else "Thịnh hành & Xu hướng nổi bật"
+
+        search_queries = []
+        if top_artists and top_genres:
+            search_queries.append(f"{top_artists[0]} {top_genres[0]}")
+            search_queries.append(f"{top_artists[0]}")
+            if len(top_artists) > 1:
+                search_queries.append(f"{top_artists[1]}")
+            else:
+                search_queries.append(f"{top_genres[0]} hay nhat")
+        elif top_artists:
+            search_queries.append(f"{top_artists[0]}")
+            if len(top_artists) > 1:
+                search_queries.append(f"{top_artists[1]}")
+            search_queries.append(f"{top_artists[0]} hay nhat")
+        elif top_genres:
+            search_queries.append(f"{top_genres[0]} hay nhat")
+            search_queries.append(f"{top_genres[0]} viet nam")
+            search_queries.append("Top V-Pop Hot")
+        else:
+            search_queries = ["Remix TikTok Hot", "Chill Lofi Viet", "Top V-Pop"]
+
+        if platform in PLATFORMS:
+            target_plats = [platform]
+        else:
+            target_plats = ["youtube", "zing", "soundcloud"]
+
+        collected_songs = []
+        seen_ids = set()
+        seen_titles = set()
+
+        for q in search_queries:
+            if len(collected_songs) >= limit * 2:
+                break
+            for p in target_plats:
+                if p not in PLATFORMS:
+                    continue
+                try:
+                    res = PLATFORMS[p].search(q, limit=6)
+                    for song in res:
+                        sid = str(song.get("id") or "")
+                        import re
+                        stitle = re.sub(r'[^a-zA-Z0-9\s]', '', (song.get("title") or "").lower()).strip()
+                        if sid and sid not in seen_ids and stitle not in seen_titles:
+                            seen_ids.add(sid)
+                            seen_titles.add(stitle)
+                            song["rec_reason"] = f"Theo gu: {q}"
+                            collected_songs.append(song)
+                except Exception as ex:
+                    print(f"[Recommendations] Search error on {p}: {str(ex).encode('ascii', 'replace').decode()}")
+
+        if len(collected_songs) < limit:
+            for p in target_plats:
+                if p not in PLATFORMS:
+                    continue
+                try:
+                    t_res = PLATFORMS[p].get_trending(limit=10)
+                    for song in t_res:
+                        sid = str(song.get("id") or "")
+                        import re
+                        stitle = re.sub(r'[^a-zA-Z0-9\s]', '', (song.get("title") or "").lower()).strip()
+                        if sid and sid not in seen_ids and stitle not in seen_titles:
+                            seen_ids.add(sid)
+                            seen_titles.add(stitle)
+                            song["rec_reason"] = "Xu hướng thịnh hành"
+                            collected_songs.append(song)
+                        if len(collected_songs) >= limit:
+                            break
+                except Exception as ex:
+                    print(f"[Recommendations] Trending error on {p}: {str(ex).encode('ascii', 'replace').decode()}")
+                if len(collected_songs) >= limit:
+                    break
+
+        final_songs = collected_songs[:limit]
+
+        return jsonify({
+            "status": "ok",
+            "platform": platform,
+            "taste": taste_summary,
+            "reason": f"Dựa trên phong cách: {taste_summary}",
+            "songs": final_songs
+        })
+    except Exception as e:
+        print(f"[Recommendations] Error: {e}")
+        return jsonify({"error": str(e), "songs": []}), 500
+
+
 # ─── Disk Audio Cache (Chống giật tuyệt đối cho bài dài YouTube / Zing) ─
 AUDIO_CACHE_DIR = Path(__file__).parent / "audio_cache"
 AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -670,18 +823,25 @@ def thumbnail():
         try:
             r = requests.get(url, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            }, timeout=8)
+            }, timeout=8, verify=False)
             if r.status_code == 200:
                 raw = r.content
         except Exception:
             pass
 
         if not raw:
-            req = urllib.request.Request(url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            })
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                raw = resp.read()
+            try:
+                import ssl
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.Request(url, headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                })
+                with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
+                    raw = resp.read()
+            except Exception:
+                pass
 
         img = Image.open(BytesIO(raw)).convert("RGB")
         # Center-crop vuông trước khi resize để ảnh không bị méo (đặc biệt là thumbnail 16:9 của YouTube)
@@ -692,7 +852,7 @@ def thumbnail():
         img = img.crop((left, top, left + min_dim, top + min_dim))
 
         # Resize về đúng độ phân giải bằng LANCZOS trước để ảnh mịn và không méo
-        img = img.resize((size, size), Image.Resampling.LANCZOS)
+        img = img.resize((size, size), _LANCZOS)
 
         # Pipeline màu sắc cho TFT RGB565: bão hòa cao + contrast tốt + sắc nét
         from PIL import ImageEnhance, ImageFilter
@@ -1637,8 +1797,8 @@ def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 940_000) -> bytes:
                 top = (h - new_h) // 2
                 f = f.crop((0, top, w, top + new_h))
 
-            f = f.resize((target_w, target_h), Image.Resampling.LANCZOS)
-            f_p = f.quantize(colors=colors, method=Image.Resampling.NEAREST)
+            f = f.resize((target_w, target_h), _LANCZOS)
+            f_p = f.quantize(colors=colors, method=_NEAREST)
             frames.append(f_p)
             dur = max(33, int(im.info.get("duration", 80) * step))
             durations.append(dur)
@@ -1710,7 +1870,7 @@ def upload_wallpaper():
             try:
                 img_pil = Image.open(BytesIO(raw))
                 img_pil.seek(0)
-                img_pil = img_pil.convert("RGB").resize((320, 240), Image.Resampling.LANCZOS)
+                img_pil = img_pil.convert("RGB").resize((320, 240), _LANCZOS)
                 img_pil = _enhance_image_for_tft(img_pil, preset)
                 img_pil.save(str(WALLPAPER_JPG), format="JPEG", quality=88)
             except Exception as pe:
@@ -1743,7 +1903,7 @@ def upload_wallpaper():
                 top = (h - new_h) // 2
                 img = img.crop((0, top, w, top + new_h))
 
-            img = img.resize((320, 240), Image.Resampling.LANCZOS)
+            img = img.resize((320, 240), _LANCZOS)
             
             # Tối ưu hóa màu sắc, chống cháy trắng cho màn hình TFT ESP32
             img = _enhance_image_for_tft(img, preset)

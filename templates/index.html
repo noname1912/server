@@ -93,11 +93,93 @@
       color: var(--sc-orange);
     }
 
-    /* Search Bar in Header */
+    /* Search Bar in Header - Overlay Mode from Corner Magnifier */
     .sc-search-wrap {
-      flex: 1;
-      max-width: 600px;
-      position: relative;
+      display: none;
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 100%;
+      background: rgba(13, 17, 23, 0.98);
+      backdrop-filter: blur(14px);
+      z-index: 100;
+      padding: 0 24px;
+      align-items: center;
+      gap: 12px;
+      box-shadow: 0 8px 30px rgba(0,0,0,0.65);
+      animation: searchSlideIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .sc-search-wrap.active {
+      display: flex;
+    }
+    @keyframes searchSlideIn {
+      from { opacity: 0; transform: translateY(-8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .sc-search-close-btn {
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid var(--sc-border);
+      color: var(--sc-text-dim);
+      width: 42px;
+      height: 42px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      font-size: 1.15rem;
+      flex-shrink: 0;
+      transition: all 0.2s ease;
+    }
+    .sc-search-close-btn:hover {
+      color: #ef4444;
+      border-color: #ef4444;
+      background: rgba(239, 68, 68, 0.15);
+    }
+    .search-corner-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 14px;
+      border-radius: 20px;
+      border: 1px solid rgba(255, 85, 0, 0.4);
+      background: rgba(255, 85, 0, 0.08);
+      color: var(--sc-orange);
+      cursor: pointer;
+      font-size: 0.88rem;
+      font-weight: 700;
+      transition: all 0.2s ease;
+    }
+    .search-corner-btn:hover {
+      background: var(--sc-orange);
+      color: #ffffff;
+      box-shadow: 0 0 15px rgba(255, 85, 0, 0.4);
+    }
+    .sc-badge-rec {
+      font-size: 0.72rem;
+      font-weight: 700;
+      background: linear-gradient(135deg, #f59e0b, #ef4444);
+      color: white;
+      padding: 3px 10px;
+      border-radius: 12px;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-left: 8px;
+      display: inline-block;
+    }
+    .sc-rec-subtitle {
+      font-size: 0.88rem;
+      color: var(--sc-text-dim);
+      margin-top: -6px;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .sc-rec-subtitle span {
+      color: var(--sc-orange);
+      font-weight: 600;
     }
     .sc-search-box {
       width: 100%;
@@ -1139,6 +1221,9 @@
 
     @media (max-width: 600px) {
       .sc-header { padding: 0 12px; gap: 8px; }
+      .search-corner-btn .search-btn-label { display: none; }
+      .search-corner-btn { padding: 8px 10px; border-radius: 50%; }
+      .sc-search-wrap { padding: 0 10px; }
       .sc-logo-text { display: none; }
       .speaker-pill span { display: none; }
       .speaker-pill { padding: 8px; border-radius: 50%; }
@@ -1319,7 +1404,7 @@
             <i class="fa-solid fa-compass"></i>
             <span>Khám Phá</span>
           </button>
-          <button class="sc-nav-btn" onclick="switchView('search'); toggleMobileSidebar();">
+          <button class="sc-nav-btn" onclick="openSearchOverlay(); switchView('search'); toggleMobileSidebar();">
             <i class="fa-solid fa-magnifying-glass"></i>
             <span>Tìm Kiếm</span>
           </button>
@@ -1378,8 +1463,8 @@
       </div>
     </div>
 
-    <!-- Live Search Box with Autosuggest + XiaoAI Voice Button -->
-    <div class="sc-search-wrap" style="display:flex; align-items:center; gap:10px;">
+    <!-- Live Search Overlay with Autosuggest + XiaoAI Voice Button + Close Button -->
+    <div class="sc-search-wrap" id="searchWrap">
       <div class="sc-search-box" style="flex:1;">
         <i class="fa-solid fa-magnifying-glass sc-search-icon"></i>
         <input type="text" id="searchInput" placeholder="Tìm bài hát, nghệ sĩ, remix, lofi..." autocomplete="off" />
@@ -1388,12 +1473,20 @@
       <button class="ai-mic-btn" id="aiMicBtn" onclick="toggleVoiceAssistant()" title="Trợ lý giọng nói XiaoAI">
         <i class="fa-solid fa-microphone"></i>
       </button>
+      <button class="sc-search-close-btn" id="searchCloseBtn" onclick="closeSearchOverlay()" title="Đóng tìm kiếm">
+        <i class="fa-solid fa-xmark"></i>
+      </button>
       <!-- Suggestions dropdown -->
       <div class="sc-suggest-box" id="suggestBox"></div>
     </div>
 
     <!-- Header Actions -->
     <div class="sc-header-actions" style="display:flex; align-items:center; gap:10px;">
+      <!-- Search Button (Kính lúp ở góc màn hình) -->
+      <button class="search-corner-btn" id="searchCornerBtn" onclick="toggleSearchOverlay()" title="Mở tìm kiếm bài hát">
+        <i class="fa-solid fa-magnifying-glass"></i>
+        <span class="search-btn-label">Tìm kiếm</span>
+      </button>
       <!-- Power Switch Button -->
       <button class="btn-sc-outline" id="powerBtn" onclick="togglePower()" title="Bật / Tắt nguồn thiết bị ESP32" style="gap:6px; padding:8px 14px; border-color: rgba(16, 185, 129, 0.4); background: rgba(16, 185, 129, 0.1);">
         <i class="fa-solid fa-power-off" id="powerIcon" style="color:#10b981;"></i>
@@ -1422,7 +1515,7 @@
           <i class="fa-solid fa-compass"></i>
           <span>Khám Phá</span>
         </button>
-        <button class="sc-nav-btn" id="navSearch" onclick="switchView('search')">
+        <button class="sc-nav-btn" id="navSearch" onclick="openSearchOverlay(); switchView('search');">
           <i class="fa-solid fa-magnifying-glass"></i>
           <span>Tìm Kiếm</span>
         </button>
@@ -1525,6 +1618,28 @@
                 <i class="fa-solid fa-image"></i> Cài Hình Nền Đồng Hồ
               </button>
             </div>
+          </div>
+        </div>
+
+        <!-- 10 BÀI HÁT ĐỀ XUẤT THEO PHONG CÁCH NGHE NHẠC CỦA BẠN -->
+        <div class="sc-section-hdr" style="margin-top: 15px;">
+          <div class="sc-section-title">
+            <i class="fa-solid fa-wand-magic-sparkles" style="color:var(--sc-orange);"></i>
+            <span id="recSectionTitle">10 Bài Hát Đề Xuất Cho Bạn</span>
+            <span class="sc-badge-rec" id="recPlatformBadge">Tất Cả Nền Tảng</span>
+          </div>
+          <button class="sc-section-action" onclick="refreshRecommendations()">
+            <i class="fa-solid fa-rotate-right"></i> Làm mới gợi ý
+          </button>
+        </div>
+        <div class="sc-rec-subtitle" id="recTasteSubtitle">
+          <i class="fa-solid fa-headphones" style="color:var(--sc-orange);"></i>
+          <span id="recTasteText">Đang phân tích phong cách nghe nhạc của bạn...</span>
+        </div>
+        <div class="sc-card-grid" id="recommendationsGrid" style="margin-bottom: 24px;">
+          <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--sc-text-dim);">
+            <i class="fa-solid fa-spinner fa-spin" style="font-size: 2rem; color: var(--sc-orange); margin-bottom: 12px;"></i>
+            <p>Đang phân tích phong cách nghe nhạc và chọn 10 bài hát đề xuất...</p>
           </div>
         </div>
 
@@ -2038,23 +2153,146 @@
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
-    // ─── Platform Filter ──────────────────────────────────────
+    // ─── Search Overlay (Kính lúp ở góc màn hình) ──────────────
+    function openSearchOverlay() {
+      const wrap = document.getElementById('searchWrap');
+      if (wrap) wrap.classList.add('active');
+      const input = document.getElementById('searchInput');
+      if (input) {
+        setTimeout(() => input.focus(), 50);
+        if (input.value.trim().length >= 2) {
+          fetchSuggestions(input.value.trim());
+        }
+      }
+    }
+
+    function closeSearchOverlay() {
+      const wrap = document.getElementById('searchWrap');
+      if (wrap) wrap.classList.remove('active');
+      const suggestBox = document.getElementById('suggestBox');
+      if (suggestBox) suggestBox.style.display = 'none';
+    }
+
+    function toggleSearchOverlay() {
+      const wrap = document.getElementById('searchWrap');
+      if (!wrap) return;
+      if (wrap.classList.contains('active')) {
+        closeSearchOverlay();
+      } else {
+        openSearchOverlay();
+      }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeSearchOverlay();
+    });
+
+    // ─── Platform Filter & 10 Bài Hát Đề Xuất ─────────────────
     function setPlatformFilter(plat) {
       currentPlatform = plat;
       ['chipAll', 'chipYt', 'chipZing', 'chipSc'].forEach(id => {
-        document.getElementById(id).classList.remove('active');
+        document.getElementById(id)?.classList.remove('active');
       });
-      if (plat === 'all') document.getElementById('chipAll').classList.add('active');
-      if (plat === 'youtube') document.getElementById('chipYt').classList.add('active');
-      if (plat === 'zing') document.getElementById('chipZing').classList.add('active');
-      if (plat === 'soundcloud') document.getElementById('chipSc').classList.add('active');
+      if (plat === 'all') document.getElementById('chipAll')?.classList.add('active');
+      if (plat === 'youtube') document.getElementById('chipYt')?.classList.add('active');
+      if (plat === 'zing') document.getElementById('chipZing')?.classList.add('active');
+      if (plat === 'soundcloud') document.getElementById('chipSc')?.classList.add('active');
 
-      const q = document.getElementById('searchInput').value.trim();
-      if (q) {
-        performSearch(q);
-      } else {
-        refreshTrending();
+      // Đóng thanh tìm kiếm overlay nếu đang mở
+      closeSearchOverlay();
+
+      // Khi ấn vào nền tảng: thay vì hiện tìm kiếm, hiển thị 10 bài hát đề xuất theo gu
+      switchView('discover');
+      loadRecommendations(plat);
+      refreshTrending();
+    }
+
+    // ─── Recommendations Loader (10 Bài hát theo phong cách nghe nhạc) ──
+    let recommendedSongs = [];
+
+    async function loadRecommendations(plat = currentPlatform) {
+      const grid = document.getElementById('recommendationsGrid');
+      const badge = document.getElementById('recPlatformBadge');
+      const tasteText = document.getElementById('recTasteText');
+
+      if (!grid) return;
+
+      const platNameMap = {
+        'all': 'Tất Cả Nền Tảng',
+        'youtube': 'YouTube',
+        'zing': 'Zing MP3',
+        'soundcloud': 'SoundCloud'
+      };
+      if (badge) badge.textContent = platNameMap[plat] || 'Theo Gu Của Bạn';
+
+      grid.innerHTML = `
+        <div style="grid-column: 1/-1; text-align: center; padding: 40px; color: var(--sc-text-dim);">
+          <i class="fa-solid fa-spinner fa-spin" style="font-size: 2rem; color: var(--sc-orange); margin-bottom: 12px;"></i>
+          <p>Đang phân tích phong cách nghe nhạc và chọn 10 bài hát đề xuất...</p>
+        </div>
+      `;
+
+      try {
+        const res = await fetch(`/api/recommendations?platform=${plat}&limit=10`);
+        const data = await res.json();
+        const songs = Array.isArray(data) ? data : (data.songs || []);
+        recommendedSongs = songs;
+
+        if (tasteText) {
+          tasteText.textContent = data.taste ? `Gu âm nhạc của bạn: ${data.taste}` : 'Đề xuất dựa trên các thể loại & ca sĩ bạn hay nghe';
+        }
+
+        if (songs.length === 0) {
+          grid.innerHTML = `<div style="grid-column:1/-1; text-align:center; color:var(--sc-text-dim); padding:30px;">Chưa có bài hát đề xuất nào. Hãy thử nghe vài bài hát để hệ thống nhận diện gu của bạn!</div>`;
+          return;
+        }
+
+        renderRecommendationsGrid(songs);
+      } catch (err) {
+        console.error("Load recommendations error:", err);
+        grid.innerHTML = `<div style="grid-column:1/-1; color:#ef4444; padding:20px;">Không thể tải bài hát đề xuất: ${err.message}</div>`;
       }
+    }
+
+    function renderRecommendationsGrid(tracks) {
+      const grid = document.getElementById('recommendationsGrid');
+      if (!grid) return;
+      grid.innerHTML = tracks.map(song => {
+        const tagClass = `tag-${song.platform || 'youtube'}`;
+        const platName = (song.platform || 'yt').toUpperCase();
+        return `
+          <div class="sc-card" onclick="playSongObject(${escapeObjectAttr(song)})" style="border: 1px solid rgba(255, 85, 0, 0.2);">
+            <div class="sc-card-thumb-wrap">
+              <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=240'}" class="sc-card-thumb" alt="Thumb" loading="lazy" />
+              <div class="platform-tag ${tagClass}">${platName}</div>
+              <div class="duration-tag">${formatTime(song.duration)}</div>
+              <div class="sc-card-overlay">
+                <div class="sc-play-btn-circle">
+                  <i class="fa-solid fa-play"></i>
+                </div>
+              </div>
+            </div>
+            <div class="sc-card-info">
+              <div class="sc-card-title" title="${song.title}">${song.title}</div>
+              <div class="sc-card-artist">${song.artist || 'Nghệ sĩ'}</div>
+            </div>
+            <div class="sc-card-actions" onclick="event.stopPropagation()">
+              <span style="font-size:0.75rem; color:var(--sc-orange); font-weight:600;">
+                <i class="fa-solid fa-wand-magic-sparkles"></i> Đề xuất
+              </span>
+              <div style="display:flex; gap:6px;">
+                <i class="fa-solid fa-forward-step sc-action-icon" onclick="addToQueueNext(${escapeObjectAttr(song)})" title="Phát tiếp theo"></i>
+                <i class="fa-solid fa-plus sc-action-icon" onclick="addToQueueEnd(${escapeObjectAttr(song)})" title="Thêm vào hàng đợi"></i>
+                <i class="fa-${isFavorite(song.id) ? 'solid' : 'regular'} fa-heart sc-action-icon" onclick="toggleFavoriteSong(${escapeObjectAttr(song)}, this)" style="${isFavorite(song.id) ? 'color:#ef4444;' : ''}" title="Yêu thích"></i>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function refreshRecommendations() {
+      loadRecommendations(currentPlatform);
     }
 
     // ─── Live Search & Suggestions ────────────────────────────
@@ -2130,6 +2368,7 @@
     // ─── Perform Search ───────────────────────────────────────
     async function performSearch(q) {
       if (!q) return;
+      closeSearchOverlay();
       switchView('search');
       document.getElementById('searchResultTitle').textContent = `Kết quả tìm kiếm: "${q}"`;
       const listEl = document.getElementById('searchResultsList');
@@ -3109,6 +3348,7 @@
       await loadFavorites();
       await loadHistory();
       await loadQueue();
+      await loadRecommendations();
       await refreshTrending();
       pollStatus();
     });
