@@ -1911,7 +1911,7 @@
   <div class="sc-player-bar">
     <!-- Left: Current Track Meta -->
     <div class="player-left">
-      <img src="https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=120&auto=format&fit=crop" id="playerThumb" class="player-art" alt="Track Cover" />
+      <img src="https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=120&auto=format&fit=crop" onerror="this.onerror=null; this.src='https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=120';" id="playerThumb" class="player-art" alt="Track Cover" />
       <div class="player-meta">
         <div class="player-title" id="playerTitle">Chưa chọn bài hát</div>
         <div class="player-artist" id="playerArtist">SoundCloud ESP32 Player</div>
@@ -2266,7 +2266,7 @@
         return `
           <div class="sc-card" onclick="playSongObject(${escapeObjectAttr(song)})" style="border: 1px solid rgba(255, 85, 0, 0.2);">
             <div class="sc-card-thumb-wrap">
-              <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=240'}" class="sc-card-thumb" alt="Thumb" loading="lazy" />
+              <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=240'}" onerror="this.onerror=null; this.src='https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=240';" class="sc-card-thumb" alt="Thumb" loading="lazy" />
               <div class="platform-tag ${tagClass}">${platName}</div>
               <div class="duration-tag">${formatTime(song.duration)}</div>
               <div class="sc-card-overlay">
@@ -2425,7 +2425,7 @@
               <div class="sc-eq-bar"></div>
               <div class="sc-eq-bar"></div>
             </div>
-            <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=96'}" class="track-thumb" alt="Thumb" loading="lazy" />
+            <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=96'}" onerror="this.onerror=null; this.src='https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=96';" class="track-thumb" alt="Thumb" loading="lazy" />
             <div class="track-details">
               <div class="track-name" title="${song.title}">${song.title}</div>
               <div class="track-sub">
@@ -2486,7 +2486,7 @@
         return `
           <div class="sc-card" onclick="playSongObject(${escapeObjectAttr(song)})">
             <div class="sc-card-thumb-wrap">
-              <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=240'}" class="sc-card-thumb" alt="Thumb" loading="lazy" />
+              <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=240'}" onerror="this.onerror=null; this.src='https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=240';" class="sc-card-thumb" alt="Thumb" loading="lazy" />
               <div class="platform-tag ${tagClass}">${platName}</div>
               <div class="duration-tag">${formatTime(song.duration)}</div>
               <div class="sc-card-overlay">
@@ -2523,6 +2523,12 @@
     // ─── Play Song (Command to Server & ESP32) ────────────────
     async function playSongObject(song) {
       if (!song || !song.id) return;
+      // Phản hồi tức thì 0ms cho người dùng không bị cảm giác chờ đợi
+      updateNowPlayingUI(song, true);
+      showToast(`Đang phát: ${song.title}`);
+      if (isWebAudioEnabled) {
+        playLocalAudio(song);
+      }
       try {
         const res = await fetch('/api/player/play', {
           method: 'POST',
@@ -2539,15 +2545,8 @@
         });
         const data = await res.json();
         if (data.status === 'ok') {
-          updateNowPlayingUI(song, true);
-          showToast(`Đang phát: ${song.title}`);
           loadHistory(); // Cập nhật lại lịch sử
           loadQueue();   // Cập nhật lại queue
-
-          // Nếu bật chế độ nghe trực tiếp trên Web Browser
-          if (isWebAudioEnabled) {
-            playLocalAudio(song);
-          }
         }
       } catch (err) {
         console.error('Play error:', err);
@@ -2618,7 +2617,7 @@
         return `
           <div class="sc-track-item ${isCurrent ? 'playing' : ''}" onclick="playSongObject(${escapeObjectAttr(song)})">
             <span class="track-num">${isCurrent ? '▶' : idx + 1}</span>
-            <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=96'}" class="track-thumb" alt="Thumb" style="width:40px; height:40px;" />
+            <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=96'}" onerror="this.onerror=null; this.src='https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=96';" class="track-thumb" alt="Thumb" style="width:40px; height:40px;" />
             <div class="track-details">
               <div class="track-name" style="font-size:0.88rem;">${song.title}</div>
               <div class="track-sub" style="font-size:0.75rem;">
@@ -2694,7 +2693,7 @@
           return `
             <div class="sc-track-item ${isCurrent ? 'playing' : ''}" onclick="playSongObject(${escapeObjectAttr(song)})">
               <span class="track-num">${idx + 1}</span>
-              <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=96'}" class="track-thumb" alt="Thumb" loading="lazy" />
+              <img src="${song.thumbnail || 'https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=96'}" onerror="this.onerror=null; this.src='https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=96';" class="track-thumb" alt="Thumb" loading="lazy" />
               <div class="track-details">
                 <div class="track-name">${song.title}</div>
                 <div class="track-sub">

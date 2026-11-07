@@ -574,32 +574,53 @@ def recommendations():
                         collected_songs.append(s)
                 except Exception: pass
         else:
-            # Tất cả nền tảng: chạy song song 3 nền tảng với timeout 2.0s
+            # Tất cả nền tảng: Lấy đủ 10 bài YouTube siêu tốc (~0.2s) làm nòng cốt
+            # và song song lấy thêm bài SoundCloud/Zing trong 0.8s tối đa để trộn đều
             with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
-                f_yt = executor.submit(_fetch_plat_songs, "youtube", primary_q, 4)
-                f_zg = executor.submit(_fetch_plat_songs, "zing", primary_q, 3)
+                f_yt = executor.submit(_fetch_plat_songs, "youtube", primary_q, limit)
                 f_sc = executor.submit(_fetch_plat_songs, "soundcloud", primary_q, 3)
+                f_zg = executor.submit(_fetch_plat_songs, "zing", primary_q, 3)
                 
-                done, not_done = concurrent.futures.wait([f_yt, f_zg, f_sc], timeout=2.0)
-                results_all = []
-                for f in [f_yt, f_zg, f_sc]:
-                    if f in done:
-                        try:
-                            results_all.extend(f.result())
-                        except Exception:
-                            pass
-                
-                # Bổ sung nếu thiếu bài do mạng chậm
-                if len(results_all) < limit:
-                    try:
-                        extra = PLATFORMS["youtube"].search(f"{primary_q} hay nhat", limit=limit - len(results_all))
-                        results_all.extend(extra)
-                    except Exception:
-                        pass
-                
-                for s in results_all:
+                yt_songs = []
+                sc_songs = []
+                zg_songs = []
+                try:
+                    yt_songs = f_yt.result(timeout=1.5)
+                except Exception:
+                    pass
+                try:
+                    sc_songs = f_sc.result(timeout=0.8)
+                except Exception:
+                    pass
+                try:
+                    zg_songs = f_zg.result(timeout=0.8)
+                except Exception:
+                    pass
+
+                # Trộn xen kẽ để người dùng thấy đa dạng nền tảng ngay lập tức
+                interleaved = []
+                i_yt, i_sc, i_zg = 0, 0, 0
+                while len(interleaved) < limit and (i_yt < len(yt_songs) or i_sc < len(sc_songs) or i_zg < len(zg_songs)):
+                    if i_yt < len(yt_songs):
+                        interleaved.append(yt_songs[i_yt])
+                        i_yt += 1
+                    if len(interleaved) < limit and i_sc < len(sc_songs):
+                        interleaved.append(sc_songs[i_sc])
+                        i_sc += 1
+                    if len(interleaved) < limit and i_zg < len(zg_songs):
+                        interleaved.append(zg_songs[i_zg])
+                        i_zg += 1
+
+                for s in interleaved:
                     s["rec_reason"] = f"Theo gu: {primary_q}"
                     collected_songs.append(s)
+
+                # Nếu vẫn chưa đủ, dùng nốt yt_songs
+                if len(collected_songs) < limit:
+                    for s in yt_songs[i_yt:]:
+                        if len(collected_songs) >= limit: break
+                        s["rec_reason"] = f"Theo gu: {primary_q}"
+                        collected_songs.append(s)
 
         final_songs = collected_songs[:limit]
 
