@@ -2471,6 +2471,52 @@ def cache_clear():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@app.route("/api/debug/test_ffmpeg/<song_id>")
+def debug_test_ffmpeg(song_id):
+    import time
+    sc = PLATFORMS.get("soundcloud")
+    t0 = time.time()
+    url = sc.get_stream_url(song_id) if sc else None
+    t_fetch = round(time.time() - t0, 2)
+    if not url:
+        return jsonify({"error": "Cannot get stream URL", "fetch_time": t_fetch})
+
+    is_m3u8 = (".m3u8" in url.lower()) or ("manifest" in url.lower()) or ("/hls" in url.lower())
+    headers_str = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nReferer: https://soundcloud.com/\r\n"
+    cmd = [
+        "ffmpeg", "-y",
+        "-rw_timeout", "6000000",
+    ]
+    if is_m3u8:
+        cmd.extend(["-protocol_whitelist", "file,http,https,tcp,tls,crypto"])
+    cmd.extend([
+        "-headers", headers_str,
+        "-i", url,
+        "-vn",
+        "-acodec", "libmp3lame",
+        "-b:a", "128k",
+        "-ar", "44100",
+        "-ac", "2",
+        "-f", "mp3",
+        "pipe:1"
+    ])
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        chunk = p.stdout.read(4096)
+        _, err = p.communicate(timeout=5)
+        p.terminate()
+        return jsonify({
+            "status": "ok",
+            "fetch_time": t_fetch,
+            "url_prefix": url[:80],
+            "chunk_len": len(chunk),
+            "stderr": err.decode("utf-8", errors="ignore")[-500:],
+            "elapsed": round(time.time() - t0, 2)
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "elapsed": round(time.time() - t0, 2)})
+
+
 @app.route("/api/debug/log")
 def debug_log():
     try:
