@@ -788,12 +788,28 @@ def stream_audio(platform: str, song_id: str):
                 if target.exists() and target.stat().st_size > 0:
                     curr_file = target
                     break
-                print("[Stream] Transcode failed or produced empty file")
-                return
+                print("[Stream] Transcode failed or produced empty file -> Chuyen sang phat truc tiep")
+                break
             time.sleep(0.05)
 
         if not curr_file or not curr_file.exists():
-            print("[Stream] Timeout chờ file tmp_mp3 xuất hiện")
+            print(f"[Stream] Fallback: Phat stream truc tiep tu URL goc: {audio_url[:60]}...")
+            try:
+                req = urllib.request.Request(
+                    audio_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                        "Referer": _get_referer(platform),
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=12) as src_resp:
+                    while True:
+                        buf = src_resp.read(16384)
+                        if not buf:
+                            break
+                        yield buf
+            except Exception as ex_proxy:
+                print(f"[Stream] Direct fallback stream error: {ex_proxy}")
             return
 
         try:
