@@ -1243,12 +1243,12 @@ _player_state = {
     "last_update": 0,
 }
 
-def _auto_play_next() -> bool:
+def _auto_play_next(from_user: bool = False) -> bool:
     global _playlist, _playlist_idx
     if not _playlist:
         return False
-    if len(_playlist) <= 1:
-        print("[PlayerHub] Playlist chỉ có 1 bài -> Kết thúc bài, không tự lặp lại vô tận")
+    if len(_playlist) <= 1 and not from_user:
+        print("[PlayerHub] Playlist chỉ có 1 bài (tự động hết bài) -> Dừng phát, không tự lặp lại vô tận")
         _player_state["state"] = "stopped"
         _player_state["stream_url"] = ""
         return False
@@ -1422,7 +1422,7 @@ def player_control():
         elif action == "set_vol":
             _player_state["volume"] = max(0, min(21, int(data.get("value", 11))))
         elif action == "next":
-            if not _auto_play_next():
+            if not _auto_play_next(from_user=True):
                 _player_state["state"] = "next_requested"
         elif action == "prev":
             if _playlist and len(_playlist) > 0:
