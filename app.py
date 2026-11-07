@@ -737,9 +737,16 @@ _transcode_lock = threading.Lock()
 _active_transcodes: dict[str, subprocess.Popen] = {}
 
 def _cleanup_old_cache(max_files: int = 60):
-    """Giữ lại 60 bài hát gần nhất trong cache, tự động xóa bài cũ."""
+    """Giữ lại 60 bài hát gần nhất trong cache, tự động xóa bài cũ và bài lỗi < 300KB."""
     try:
         files = list(AUDIO_CACHE_DIR.glob("*.mp3"))
+        for f in files:
+            try:
+                if f.stat().st_size < 300000:
+                    f.unlink()
+            except Exception:
+                pass
+        files = [f for f in AUDIO_CACHE_DIR.glob("*.mp3") if not f.name.endswith(".tmp.mp3")]
         if len(files) > max_files:
             files.sort(key=lambda f: f.stat().st_mtime)
             for f in files[:-max_files]:
@@ -769,8 +776,12 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
         return  # Không có FFmpeg -> phat stream truc tiep, khong transcode
 
     final_mp3, tmp_mp3 = _get_cache_paths(platform, song_id)
-    if final_mp3.exists() and final_mp3.stat().st_size > 20000:
-        return
+    if final_mp3.exists():
+        if final_mp3.stat().st_size > 300000:
+            return
+        else:
+            try: final_mp3.unlink()
+            except Exception: pass
     cache_key = f"{platform}:{song_id}"
     with _transcode_lock:
         proc = _active_transcodes.get(cache_key)
@@ -791,11 +802,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
             "ffmpeg",
             "-y",
             "-loglevel", "error",
-            "-rw_timeout", "8000000",
-            "-probesize", "32768",
-            "-analyzeduration", "500000",
-            "-fflags", "nobuffer+fastseek+flush_packets",
-            "-flags", "low_delay",
+            "-rw_timeout", "15000000",
         ]
         # reconnect options chi hop le voi giao thuc HTTP truc tiep, khong ap dung cho HLS demuxer
         if is_m3u8:
@@ -813,7 +820,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
             "-thread_queue_size", "4096",
             "-i", audio_url,
             "-vn",
-            "-af", "volume=0.80",
+            "-af", "volume=0.85",
             "-acodec", "libmp3lame",
             "-b:a", "128k",
             "-ar", "44100",
@@ -833,7 +840,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
         def _watch_transcode(p=proc, tmp_p=tmp_mp3, final_p=final_mp3, ckey=cache_key):
             try:
                 p.wait()
-                if p.returncode == 0 and tmp_p.exists() and tmp_p.stat().st_size > 20000:
+                if p.returncode == 0 and tmp_p.exists() and tmp_p.stat().st_size > 300000:
                     if final_p.exists():
                         try: final_p.unlink()
                         except Exception: pass
@@ -841,6 +848,9 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
                     print(f"[Stream-Cache] Hoàn tất cache: {final_p.name} ({final_p.stat().st_size // 1024} KB)")
                     _cleanup_old_cache(60)
                 else:
+                    if tmp_p.exists():
+                        try: tmp_p.unlink()
+                        except Exception: pass
                     print(f"[Stream-Cache] Transcode finished/aborted for {ckey}")
             except Exception as ex:
                 print(f"[Stream-Cache] Watch error: {ex}")
@@ -884,10 +894,15 @@ def stream_audio(platform: str, song_id: str):
 
     final_mp3, tmp_mp3 = _get_cache_paths(platform, song_id)
 
-    # 1. NẾU ĐÃ CÓ TRONG CACHE HOÀN CHỈNH -> PHÁT NGAY LẬP TỨC 100% MƯỢT
-    if final_mp3.exists() and final_mp3.stat().st_size > 20000:
-        print(f"[Stream] Serving cached: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
-        return send_file(str(final_mp3), mimetype="audio/mpeg", conditional=True)
+    # 1. NẾU ĐÃ CÓ TRONG CACHE HOÀN CHỈNH (> 300KB) -> PHÁT NGAY LẬP TỨC 100% MƯỢT
+    if final_mp3.exists():
+        if final_mp3.stat().st_size > 300000:
+            print(f"[Stream] Serving cached: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
+            return send_file(str(final_mp3), mimetype="audio/mpeg", conditional=True)
+        else:
+            print(f"[Stream] Xóa file cache hỏng/cụt: {final_mp3.name} ({final_mp3.stat().st_size} bytes)")
+            try: final_mp3.unlink()
+            except Exception: pass
 
     # 2. NẾU CHƯA CÓ TRONG CACHE:
     # Lấy stream URL gốc
@@ -949,11 +964,7 @@ def stream_audio(platform: str, song_id: str):
         "ffmpeg",
         "-y",
         "-loglevel", "error",
-        "-rw_timeout", "8000000",
-        "-probesize", "32768",
-        "-analyzeduration", "500000",
-        "-fflags", "nobuffer+fastseek+flush_packets",
-        "-flags", "low_delay",
+        "-rw_timeout", "15000000",
     ]
     if is_m3u8:
         cmd.extend([
@@ -969,7 +980,7 @@ def stream_audio(platform: str, song_id: str):
         "-headers", headers_str,
         "-i", audio_url,
         "-vn",
-        "-af", "volume=0.80",
+        "-af", "volume=0.85",
         "-acodec", "libmp3lame",
         "-b:a", "128k",
         "-ar", "44100",
@@ -1033,13 +1044,17 @@ def stream_audio(platform: str, song_id: str):
             if f_cache:
                 f_cache.close()
                 f_cache = None
-                if proc.returncode == 0 and tmp_mp3.exists() and tmp_mp3.stat().st_size > 20000:
+                if proc.returncode == 0 and tmp_mp3.exists() and tmp_mp3.stat().st_size > 300000:
                     if final_mp3.exists():
                         try: final_mp3.unlink()
                         except Exception: pass
                     tmp_mp3.rename(final_mp3)
                     print(f"[Stream-Cache] Cache complete: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
                     _cleanup_old_cache(60)
+                else:
+                    if tmp_mp3.exists():
+                        try: tmp_mp3.unlink()
+                        except Exception: pass
         except Exception as e:
             print(f"[Stream-Pipe] Error: {e}")
         finally:
@@ -1048,6 +1063,7 @@ def stream_audio(platform: str, song_id: str):
                 except Exception: pass
             if proc and proc.poll() is None:
                 try: proc.kill()
+                except Exception: pass
                 except Exception: pass
 
     return Response(
@@ -2391,7 +2407,25 @@ def get_wallpaper_info():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "version": "2.4-stable"})
+    return jsonify({"status": "ok", "version": "2.5-purestream"})
+
+
+@app.route("/api/cache/clear", methods=["GET", "POST"])
+def cache_clear():
+    """Xóa sạch cache đệm SSD để loại bỏ tất cả các file bài hát bị lỗi/cụt."""
+    deleted = 0
+    try:
+        for f in AUDIO_CACHE_DIR.glob("*.mp3"):
+            try:
+                f.unlink()
+                deleted += 1
+            except Exception:
+                pass
+        _stream_cache.clear()
+        print(f"[Cache] Đã xóa toàn bộ {deleted} file cache cũ.")
+        return jsonify({"status": "ok", "deleted_files": deleted})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 
 @app.route("/api/debug/log")
