@@ -979,16 +979,32 @@ def thumbnail():
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                     "Referer": "https://soundcloud.com/",
                     "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-                }, timeout=2.5, verify=False)
+                }, timeout=5.0, verify=False)
                 if r.status_code == 200 and len(r.content) > 100:
                     raw = r.content
             except Exception:
                 pass
 
+            if not raw:
+                try:
+                    import urllib.request, ssl
+                    ctx = ssl.create_default_context()
+                    ctx.check_hostname = False
+                    ctx.verify_mode = ssl.CERT_NONE
+                    req = urllib.request.Request(url, headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                        "Referer": "https://soundcloud.com/",
+                    })
+                    with urllib.request.urlopen(req, timeout=5.0, context=ctx) as resp:
+                        raw = resp.read()
+                except Exception:
+                    pass
+
+        print(f"[Thumbnail] {url[:50]} -> {'OK ' + str(len(raw)) if raw else 'FAILED'}")
+
         if not raw:
+            # Tra ve fallback cho lan nay nhung KHONG cache de lan sau van thu tai lai anh goc
             fallback = _make_fallback_rgb565(size, plat_hint)
-            with _thumb_lock:
-                _thumb_cache[cache_key] = fallback
             return Response(fallback, status=200, mimetype="application/octet-stream",
                             headers={"X-Width": str(size), "X-Height": str(size),
                                      "Content-Length": str(len(fallback))})
@@ -1101,7 +1117,7 @@ def _prewarm_thumbs(song_list, size=32):
                             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                             "Referer": "https://soundcloud.com/",
                             "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-                        }, timeout=3.0, verify=False)
+                        }, timeout=6.0, verify=False)
                         if r.status_code == 200 and len(r.content) > 100:
                             img = Image.open(BytesIO(r.content)).convert("RGB")
                             w, h = img.size
@@ -1122,8 +1138,9 @@ def _prewarm_thumbs(song_list, size=32):
                                 idx += 2
                             with _thumb_lock:
                                 _thumb_cache[cache_key] = bytes(buf)
-                    except Exception:
-                        pass
+                            print(f"[Prewarm] Cached image for: {u[:45]}")
+                    except Exception as ex_pw:
+                        print(f"[Prewarm] Fetch failed for {u[:45]}: {ex_pw}")
             except Exception:
                 pass
     threading.Thread(target=_worker, daemon=True).start()
