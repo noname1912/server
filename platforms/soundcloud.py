@@ -29,6 +29,10 @@ _YDL_STREAM_OPTS = {
 
 _SC_CLIENT_IDS = [
     "39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ",
+    "b45b1e1079f42ab666772d8a886b6634",
+    "a3e059563d7fd3372b49b37f00a00bcf",
+    "fDoItMDGz7Z5e55hYgH2z4N2FvY46452",
+    "2t9loNfh0ekOfkJulRADQI9LgahLpt3x",
 ]
 _sc_cid_idx = 0
 _sc_client_id = _SC_CLIENT_IDS[0]
@@ -311,37 +315,40 @@ class SoundCloudPlatform:
                 numeric_id = m.group(1)
 
         if numeric_id:
-            try:
-                t_url = f"https://api-v2.soundcloud.com/tracks/{numeric_id}?client_id={cid}"
-                t_req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(t_req, timeout=5) as t_res:
-                    t_data = json.loads(t_res.read().decode("utf-8"))
-                trans = t_data.get("media", {}).get("transcodings", [])
-                # Sắp xếp ưu tiên: 1. progressive (mp3), 2. audio/mpeg (mp3 HLS), 3. audio/mp4 (fMP4 aac)
-                def _trans_score(x):
-                    proto = (x.get("format", {}).get("protocol") or "").lower()
-                    mime = (x.get("format", {}).get("mime_type") or "").lower()
-                    if proto == "progressive": return 100
-                    if "mpeg" in mime: return 80
-                    if "mp4" in mime: return 20
-                    return 50
-                sorted_trans = sorted(trans, key=_trans_score, reverse=True)
-                for target in sorted_trans:
-                    if not target or not target.get("url"):
-                        continue
-                    try:
-                        m_url = target["url"] + f"?client_id={cid}"
-                        m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0"})
-                        with urllib.request.urlopen(m_req, timeout=4) as m_res:
-                            m_data = json.loads(m_res.read().decode("utf-8"))
-                            direct = m_data.get("url")
-                            if direct:
-                                print(f"[SoundCloud] Direct API v2 stream URL obtained: {direct[:60]}...")
-                                return direct
-                    except Exception:
-                        continue
-            except Exception as ex_v2:
-                print(f"[SoundCloud] Direct API v2 stream failed ({ex_v2}), falling back to yt-dlp...")
+            for cid_attempt in range(min(3, len(_SC_CLIENT_IDS) + 1)):
+                cid = _get_sc_client_id()
+                try:
+                    t_url = f"https://api-v2.soundcloud.com/tracks/{numeric_id}?client_id={cid}"
+                    t_req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(t_req, timeout=4) as t_res:
+                        t_data = json.loads(t_res.read().decode("utf-8"))
+                    trans = t_data.get("media", {}).get("transcodings", [])
+                    # Sắp xếp ưu tiên: 1. progressive (mp3), 2. audio/mpeg (mp3 HLS), 3. audio/mp4 (fMP4 aac)
+                    def _trans_score(x):
+                        proto = (x.get("format", {}).get("protocol") or "").lower()
+                        mime = (x.get("format", {}).get("mime_type") or "").lower()
+                        if proto == "progressive": return 100
+                        if "mpeg" in mime: return 80
+                        if "mp4" in mime: return 20
+                        return 50
+                    sorted_trans = sorted(trans, key=_trans_score, reverse=True)
+                    for target in sorted_trans:
+                        if not target or not target.get("url"):
+                            continue
+                        try:
+                            m_url = target["url"] + f"?client_id={cid}"
+                            m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0"})
+                            with urllib.request.urlopen(m_req, timeout=4) as m_res:
+                                m_data = json.loads(m_res.read().decode("utf-8"))
+                                direct = m_data.get("url")
+                                if direct:
+                                    print(f"[SoundCloud] Direct API v2 stream URL obtained: {direct[:60]}...")
+                                    return direct
+                        except Exception:
+                            continue
+                except Exception as ex_v2:
+                    print(f"[SoundCloud] Direct API v2 attempt {cid_attempt+1} failed ({ex_v2}), rotating client_id...")
+                    _rotate_sc_client_id()
 
         # 2. Fallback sang yt-dlp nếu không lấy được bằng API v2
         if raw_url:
