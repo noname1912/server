@@ -114,6 +114,7 @@ def search():
             _playlist = list(results)
             _playlist_idx = 0
         _set_cache(cache_key, results)
+        _prewarm_thumbs(results, 32, sync_count=5)
         return jsonify(results)
     except Exception as e:
         print(f"[Search] Error: {e}")
@@ -445,6 +446,7 @@ def trending():
     try:
         results = PLATFORMS[platform].get_trending(limit=20)
         _set_cache(cache_key, results)
+        _prewarm_thumbs(results, 32, sync_count=5)
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -943,6 +945,120 @@ def _make_fallback_rgb565(size: int = 32, plat: str = "youtube") -> bytes:
             idx += 2
     return bytes(buf)
 
+def _process_image_to_rgb565(raw_bytes: bytes, size: int = 32) -> bytes:
+    """Chuyển đổi raw image bytes (JPEG/PNG/WebP) sang RGB565 big-endian siêu tốc."""
+    img = Image.open(BytesIO(raw_bytes)).convert("RGB")
+    w, h = img.size
+    min_dim = min(w, h)
+    left = (w - min_dim) // 2
+    top = (h - min_dim) // 2
+    img = img.crop((left, top, left + min_dim, top + min_dim)).resize((size, size), _LANCZOS)
+
+    from PIL import ImageEnhance
+    img = ImageEnhance.Contrast(img).enhance(1.20)
+    img = ImageEnhance.Color(img).enhance(1.35)
+    img = ImageEnhance.Sharpness(img).enhance(1.25)
+
+    raw_rgb = img.tobytes()
+    buf = bytearray(size * size * 2)
+    idx = 0
+    for i in range(size * size):
+        r = raw_rgb[i * 3]
+        g = raw_rgb[i * 3 + 1]
+        b = raw_rgb[i * 3 + 2]
+        rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+        buf[idx]     = (rgb565 >> 8) & 0xFF
+        buf[idx + 1] = rgb565 & 0xFF
+        idx += 2
+    return bytes(buf)
+
+
+def _download_and_cache_thumbnail(url: str, size: int = 32) -> bytes:
+    """Tải và lưu vào RAM cache ảnh RGB565."""
+    if not url or not url.startswith("http"):
+        return b""
+    cache_key = f"{url}:{size}"
+    with _thumb_lock:
+        if cache_key in _thumb_cache:
+            return _thumb_cache[cache_key]
+
+    raw = None
+    try:
+        r = requests.get(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": "https://soundcloud.com/",
+            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+        }, timeout=3.5, verify=False)
+        if r.status_code == 200 and len(r.content) > 100:
+            raw = r.content
+    except Exception:
+        pass
+
+    if not raw:
+        try:
+            import urllib.request, ssl
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Referer": "https://soundcloud.com/",
+            })
+            with urllib.request.urlopen(req, timeout=3.5, context=ctx) as resp:
+                raw = resp.read()
+        except Exception:
+            pass
+
+    if not raw:
+        return b""
+
+    try:
+        data = _process_image_to_rgb565(raw, size)
+        with _thumb_lock:
+            if len(_thumb_cache) > 300:
+                _thumb_cache.clear()
+            _thumb_cache[cache_key] = data
+        return data
+    except Exception as e:
+        print(f"[Thumbnail] Convert error: {e}")
+        return b""
+
+
+def _prewarm_thumbs(song_list, size=32, sync_count=5):
+    """
+    Tải trước thumbnail bằng đa luồng song song:
+    - sync_count bài đầu tiên (5 bài hiện ngay trên màn hình ESP32): tải song song đồng bộ (~0.3s)
+      để khi ESP32 nhận danh sách và gọi /api/thumbnail là CÓ NGAY TRONG RAM!
+    - Các bài còn lại: tải ngầm trong background thread.
+    """
+    if not song_list:
+        return
+    urls = []
+    for s in song_list:
+        if isinstance(s, dict):
+            u = s.get("thumbnail") or ""
+            if u and u.startswith("http"):
+                urls.append(u)
+    if not urls:
+        return
+
+    sync_urls = urls[:sync_count]
+    rest_urls = urls[sync_count:]
+
+    if sync_urls:
+        from concurrent.futures import ThreadPoolExecutor, wait
+        with ThreadPoolExecutor(max_workers=min(len(sync_urls), 5)) as pool:
+            futures = [pool.submit(_download_and_cache_thumbnail, u, size) for u in sync_urls]
+            wait(futures, timeout=1.8)
+
+    if rest_urls:
+        def _bg_worker():
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                list(pool.map(lambda u: _download_and_cache_thumbnail(u, size), rest_urls))
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
+
 @app.route("/api/thumbnail")
 def thumbnail():
     """
@@ -971,179 +1087,18 @@ def thumbnail():
                         headers={"X-Width": str(size), "X-Height": str(size),
                                  "Content-Length": str(len(cached))})
 
-    try:
-        raw = None
-        if url.startswith("http"):
-            try:
-                r = requests.get(url, headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                    "Referer": "https://soundcloud.com/",
-                    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-                }, timeout=5.0, verify=False)
-                if r.status_code == 200 and len(r.content) > 100:
-                    raw = r.content
-            except Exception:
-                pass
-
-            if not raw:
-                try:
-                    import urllib.request, ssl
-                    ctx = ssl.create_default_context()
-                    ctx.check_hostname = False
-                    ctx.verify_mode = ssl.CERT_NONE
-                    req = urllib.request.Request(url, headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                        "Referer": "https://soundcloud.com/",
-                    })
-                    with urllib.request.urlopen(req, timeout=5.0, context=ctx) as resp:
-                        raw = resp.read()
-                except Exception:
-                    pass
-
-        print(f"[Thumbnail] {url[:50]} -> {'OK ' + str(len(raw)) if raw else 'FAILED'}")
-
-        if not raw:
-            # Tra ve fallback cho lan nay nhung KHONG cache de lan sau van thu tai lai anh goc
-            fallback = _make_fallback_rgb565(size, plat_hint)
-            return Response(fallback, status=200, mimetype="application/octet-stream",
-                            headers={"X-Width": str(size), "X-Height": str(size),
-                                     "Content-Length": str(len(fallback))})
-
-        img = Image.open(BytesIO(raw)).convert("RGB")
-        # Center-crop vuông trước khi resize để ảnh không bị méo (đặc biệt là thumbnail 16:9 của YouTube)
-        w, h = img.size
-        min_dim = min(w, h)
-        left = (w - min_dim) // 2
-        top = (h - min_dim) // 2
-        img = img.crop((left, top, left + min_dim, top + min_dim))
-
-        # Resize về đúng độ phân giải bằng LANCZOS trước để ảnh mịn và không méo
-        img = img.resize((size, size), _LANCZOS)
-
-        # Pipeline màu sắc cho TFT RGB565: bão hòa cao + contrast tốt + sắc nét
-        from PIL import ImageEnhance, ImageFilter
-        img = ImageEnhance.Contrast(img).enhance(1.20)        # Tương phản cao hơn để rõ chi tiết
-        img = ImageEnhance.Color(img).enhance(1.40)           # Bão hòa màu cao hơn bù cho RGB565
-        img = ImageEnhance.Sharpness(img).enhance(1.30)       # Sắc nét thêm
-
-        buf = bytearray(size * size * 2)
-
-        # Cố gắng dùng Floyd-Steinberg dithering qua numpy nếu có
-        try:
-            import numpy as np
-            img_filtered = img.filter(ImageFilter.UnsharpMask(radius=1.0, percent=130, threshold=2))
-            arr = np.array(img_filtered, dtype=np.float32)
-            H, W = arr.shape[:2]
-            idx = 0
-            for y in range(H):
-                for x in range(W):
-                    r_old = int(min(255, max(0, arr[y, x, 0])))
-                    g_old = int(min(255, max(0, arr[y, x, 1])))
-                    b_old = int(min(255, max(0, arr[y, x, 2])))
-
-                    r_new = (r_old & 0xF8)
-                    g_new = (g_old & 0xFC)
-                    b_new = (b_old & 0xF8)
-
-                    er = r_old - r_new
-                    eg = g_old - g_new
-                    eb = b_old - b_new
-
-                    if x + 1 < W:
-                        arr[y,   x+1, 0] += er * 7 / 16
-                        arr[y,   x+1, 1] += eg * 7 / 16
-                        arr[y,   x+1, 2] += eb * 7 / 16
-                    if y + 1 < H:
-                        if x > 0:
-                            arr[y+1, x-1, 0] += er * 3 / 16
-                            arr[y+1, x-1, 1] += eg * 3 / 16
-                            arr[y+1, x-1, 2] += eb * 3 / 16
-                        arr[y+1, x,   0] += er * 5 / 16
-                        arr[y+1, x,   1] += eg * 5 / 16
-                        arr[y+1, x,   2] += eb * 5 / 16
-                        if x + 1 < W:
-                            arr[y+1, x+1, 0] += er * 1 / 16
-                            arr[y+1, x+1, 1] += eg * 1 / 16
-                            arr[y+1, x+1, 2] += eb * 1 / 16
-
-                    rgb565 = ((r_new & 0xF8) << 8) | ((g_new & 0xFC) << 3) | (b_new >> 3)
-                    buf[idx]     = (rgb565 >> 8) & 0xFF
-                    buf[idx + 1] = rgb565 & 0xFF
-                    idx += 2
-        except ImportError:
-            # Fallback pure-Python siêu nhanh (chỉ ~4ms), không phụ thuộc numpy
-            raw_rgb = img.tobytes()
-            idx = 0
-            for i in range(size * size):
-                r = raw_rgb[i * 3]
-                g = raw_rgb[i * 3 + 1]
-                b = raw_rgb[i * 3 + 2]
-                rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-                buf[idx]     = (rgb565 >> 8) & 0xFF
-                buf[idx + 1] = rgb565 & 0xFF
-                idx += 2
-
-        data = bytes(buf)
-        with _thumb_lock:
-            if len(_thumb_cache) > 200:
-                _thumb_cache.clear()
-            _thumb_cache[cache_key] = data
-
+    # Nếu chưa có trong cache, tải và xử lý ngay
+    data = _download_and_cache_thumbnail(url, size)
+    if data:
         return Response(data, status=200, mimetype="application/octet-stream",
                         headers={"X-Width": str(size), "X-Height": str(size),
                                  "Content-Length": str(len(data))})
 
-    except Exception as e:
-        print(f"[Thumbnail] Error: {e}")
-        fallback = _make_fallback_rgb565(size, plat_hint)
-        return Response(fallback, status=200, mimetype="application/octet-stream",
-                        headers={"X-Width": str(size), "X-Height": str(size),
-                                 "Content-Length": str(len(fallback))})
-
-
-
-def _prewarm_thumbs(song_list, size=32):
-    def _worker():
-        for s in (song_list or []):
-            try:
-                u = s.get("thumbnail") if isinstance(s, dict) else ""
-                if u and u.startswith("http"):
-                    cache_key = f"{u}:{size}"
-                    with _thumb_lock:
-                        if cache_key in _thumb_cache:
-                            continue
-                    try:
-                        r = requests.get(u, headers={
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                            "Referer": "https://soundcloud.com/",
-                            "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-                        }, timeout=6.0, verify=False)
-                        if r.status_code == 200 and len(r.content) > 100:
-                            img = Image.open(BytesIO(r.content)).convert("RGB")
-                            w, h = img.size
-                            min_dim = min(w, h)
-                            left = (w - min_dim) // 2
-                            top = (h - min_dim) // 2
-                            img = img.crop((left, top, left + min_dim, top + min_dim)).resize((size, size), _LANCZOS)
-                            raw_rgb = img.tobytes()
-                            buf = bytearray(size * size * 2)
-                            idx = 0
-                            for i in range(size * size):
-                                r_c = raw_rgb[i * 3]
-                                g_c = raw_rgb[i * 3 + 1]
-                                b_c = raw_rgb[i * 3 + 2]
-                                rgb565 = ((r_c & 0xF8) << 8) | ((g_c & 0xFC) << 3) | (b_c >> 3)
-                                buf[idx] = (rgb565 >> 8) & 0xFF
-                                buf[idx + 1] = rgb565 & 0xFF
-                                idx += 2
-                            with _thumb_lock:
-                                _thumb_cache[cache_key] = bytes(buf)
-                            print(f"[Prewarm] Cached image for: {u[:45]}")
-                    except Exception as ex_pw:
-                        print(f"[Prewarm] Fetch failed for {u[:45]}: {ex_pw}")
-            except Exception:
-                pass
-    threading.Thread(target=_worker, daemon=True).start()
+    # Nếu tải thất bại (link chết hoặc timeout), trả về fallback nhưng KHÔNG cache
+    fallback = _make_fallback_rgb565(size, plat_hint)
+    return Response(fallback, status=200, mimetype="application/octet-stream",
+                    headers={"X-Width": str(size), "X-Height": str(size),
+                             "Content-Length": str(len(fallback))})
 
 # ─── Platforms Info ──────────────────────────────────────────────
 
