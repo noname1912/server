@@ -908,6 +908,40 @@ _thumb_lock  = threading.Lock()
 
 THUMB_SIZE = 36   # 36×36 px → 2592 bytes RGB565
 
+def _make_fallback_rgb565(size: int = 32, plat: str = "youtube") -> bytes:
+    """Tao nhanh anh bia dai dien nen tang dang RGB565 sieu toc (~0.1ms)."""
+    if plat == "soundcloud":
+        bg_r, bg_g, bg_b = 255, 85, 0    # Cam SoundCloud
+    elif plat == "zing":
+        bg_r, bg_g, bg_b = 139, 92, 246  # Tim Zing
+    else:
+        bg_r, bg_g, bg_b = 239, 68, 68   # Do YouTube
+
+    buf = bytearray(size * size * 2)
+    idx = 0
+    center = size // 2
+    for y in range(size):
+        for x in range(size):
+            is_border = (x == 0 or x == size - 1 or y == 0 or y == size - 1)
+            dx = x - center
+            dy = y - center
+            is_symbol = (-3 <= dy <= 3) and (-2 <= dx <= dy + 1)
+            if is_symbol:
+                r, g, b = 255, 255, 255
+            elif is_border:
+                r, g, b = min(255, bg_r + 40), min(255, bg_g + 40), min(255, bg_b + 40)
+            else:
+                factor = 0.85 + 0.3 * (y / size)
+                r = int(min(255, bg_r * factor))
+                g = int(min(255, bg_g * factor))
+                b = int(min(255, bg_b * factor))
+
+            rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+            buf[idx]     = (rgb565 >> 8) & 0xFF
+            buf[idx + 1] = rgb565 & 0xFF
+            idx += 2
+    return bytes(buf)
+
 @app.route("/api/thumbnail")
 def thumbnail():
     """
@@ -920,10 +954,13 @@ def thumbnail():
     size = int(request.args.get("size", THUMB_SIZE))
     size = max(16, min(size, 80))  # clamp 16..80
 
-    if not url:
-        abort(400, "Missing url")
+    plat_hint = "soundcloud" if ("sndcdn" in url or "soundcloud" in url) else ("zing" if "zing" in url else "youtube")
 
-    print(f"[Thumbnail] Request size={size} from {request.remote_addr} for: {url[:60]}")
+    if not url:
+        fallback = _make_fallback_rgb565(size, plat_hint)
+        return Response(fallback, status=200, mimetype="application/octet-stream",
+                        headers={"X-Width": str(size), "X-Height": str(size),
+                                 "Content-Length": str(len(fallback))})
 
     cache_key = f"{url}:{size}"
     with _thumb_lock:
@@ -935,28 +972,25 @@ def thumbnail():
 
     try:
         raw = None
-        try:
-            r = requests.get(url, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            }, timeout=8, verify=False)
-            if r.status_code == 200:
-                raw = r.content
-        except Exception:
-            pass
-
-        if not raw:
+        if url.startswith("http"):
             try:
-                import ssl
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                req = urllib.request.Request(url, headers={
+                r = requests.get(url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                })
-                with urllib.request.urlopen(req, timeout=8, context=ctx) as resp:
-                    raw = resp.read()
+                    "Referer": "https://soundcloud.com/",
+                    "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
+                }, timeout=1.5, verify=False)
+                if r.status_code == 200 and len(r.content) > 100:
+                    raw = r.content
             except Exception:
                 pass
+
+        if not raw:
+            fallback = _make_fallback_rgb565(size, plat_hint)
+            with _thumb_lock:
+                _thumb_cache[cache_key] = fallback
+            return Response(fallback, status=200, mimetype="application/octet-stream",
+                            headers={"X-Width": str(size), "X-Height": str(size),
+                                     "Content-Length": str(len(fallback))})
 
         img = Image.open(BytesIO(raw)).convert("RGB")
         # Center-crop vuông trước khi resize để ảnh không bị méo (đặc biệt là thumbnail 16:9 của YouTube)
@@ -1044,11 +1078,10 @@ def thumbnail():
 
     except Exception as e:
         print(f"[Thumbnail] Error: {e}")
-        # Trả về ảnh placeholder màu xám
-        placeholder = bytes([0x42, 0x08] * (size * size))  # #808080
-        return Response(placeholder, status=200, mimetype="application/octet-stream",
+        fallback = _make_fallback_rgb565(size, plat_hint)
+        return Response(fallback, status=200, mimetype="application/octet-stream",
                         headers={"X-Width": str(size), "X-Height": str(size),
-                                 "Content-Length": str(len(placeholder))})
+                                 "Content-Length": str(len(fallback))})
 
 
 # ─── Platforms Info ──────────────────────────────────────────────
