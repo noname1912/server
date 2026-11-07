@@ -692,6 +692,11 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
             try: tmp_mp3.unlink()
             except Exception: pass
 
+        headers_str = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
+        ref = _get_referer(platform)
+        if ref:
+            headers_str += f"Referer: {ref}\r\n"
+
         cmd = [
             "ffmpeg",
             "-y",
@@ -699,7 +704,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
-            "-headers", f"Referer: {_get_referer(platform)}\r\nUser-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n",
+            "-headers", headers_str,
             "-thread_queue_size", "4096",
             "-i", audio_url,
             "-vn",
@@ -797,10 +802,14 @@ def stream_audio(platform: str, song_id: str):
 
     import shutil
     has_ffmpeg = bool(shutil.which("ffmpeg"))
+    is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower())
 
-    # Nếu không có FFmpeg hoặc là SoundCloud: Phát trực tiếp siêu tốc (Instant Direct Proxy) trong 0.05s
-    if not has_ffmpeg or platform == "soundcloud":
-        print(f"[Stream] Instant Direct Proxy (no-ffmpeg) for {platform}:{song_id}")
+    # Nếu không có FFmpeg trên server:
+    if not has_ffmpeg:
+        if is_m3u8:
+            print(f"[Stream-Error] URL is HLS/m3u8 but FFmpeg is not installed on server: {audio_url[:60]}")
+            abort(500, "Server missing FFmpeg for HLS transcoding")
+        print(f"[Stream] Direct Proxy (no-ffmpeg) for {platform}:{song_id}")
         def generate_direct():
             req = urllib.request.Request(
                 audio_url,
@@ -837,7 +846,7 @@ def stream_audio(platform: str, song_id: str):
     def generate_progressive(tmp_p=tmp_mp3, p=proc, final_p=final_mp3):
         t0 = time.time()
         curr_file = None
-        while time.time() - t0 < 6.0:
+        while time.time() - t0 < 8.0:
             target = final_p if final_p.exists() else tmp_p
             if target.exists() and target.stat().st_size >= 4096:
                 curr_file = target
@@ -851,7 +860,10 @@ def stream_audio(platform: str, song_id: str):
             time.sleep(0.04)
 
         if not curr_file or not curr_file.exists():
-            # Fallback trực tiếp nếu FFmpeg bị chậm
+            if is_m3u8:
+                print(f"[Stream-Error] FFmpeg transcode failed to create buffer for m3u8 stream: {cache_key}")
+                return
+            # Fallback trực tiếp nếu FFmpeg bị chậm và không phải m3u8
             req = urllib.request.Request(
                 audio_url,
                 headers={
@@ -868,20 +880,34 @@ def stream_audio(platform: str, song_id: str):
 
         try:
             with open(curr_file, "rb") as f:
+                empty_spins = 0
                 while True:
                     chunk = f.read(16384)
                     if chunk:
+                        empty_spins = 0
                         yield chunk
                     else:
-                        if p and p.poll() is not None:
-                            while True:
-                                rem = f.read(16384)
-                                if not rem: break
+                        # Nếu đang đọc final_p (file hoàn chỉnh), gặp EOF là phát xong
+                        if curr_file == final_p or final_p.exists():
+                            rem = f.read()
+                            if rem:
                                 yield rem
                             break
+                        # Nếu tiến trình ffmpeg đã kết thúc
+                        if p is not None and p.poll() is not None:
+                            rem = f.read()
+                            if rem:
+                                yield rem
+                            break
+                        # Nếu p là None và không còn dữ liệu
+                        if p is None:
+                            break
+                        empty_spins += 1
+                        if empty_spins > 300:  # ~12 giây không có byte mới -> dừng
+                            break
                         time.sleep(0.04)
-        except Exception:
-            pass
+        except Exception as ex_read:
+            print(f"[Stream] Read error: {ex_read}")
 
     return Response(
         stream_with_context(generate_progressive()),
@@ -1167,6 +1193,11 @@ def _auto_play_next() -> bool:
     global _playlist, _playlist_idx
     if not _playlist:
         return False
+    if len(_playlist) <= 1:
+        print("[PlayerHub] Playlist chỉ có 1 bài -> Kết thúc bài, không tự lặp lại vô tận")
+        _player_state["state"] = "stopped"
+        _player_state["stream_url"] = ""
+        return False
     _playlist_idx = (_playlist_idx + 1) % len(_playlist)
     next_song = _playlist[_playlist_idx]
     platform = str(next_song.get("platform", "youtube")).lower()
@@ -1284,7 +1315,7 @@ def player_play():
                         with _cache_lock:
                             _stream_cache[f"{platform}:{song_id}"] = fresh_url
                             _stream_cache[f"{platform}:{safe_id}"] = fresh_url
-            if fresh_url and platform != "soundcloud":
+            if fresh_url:
                 _start_transcode_background(platform, song_id, fresh_url)
                 if safe_id != song_id:
                     _start_transcode_background(platform, safe_id, fresh_url)
@@ -1621,6 +1652,8 @@ def player_report():
             # Đây chỉ là lỗi rớt mạng hoặc đệm tạm thời của Loa, TUYỆT ĐỐI KHÔNG nhảy bài!
             if song_dur > 20 and cur_elapsed < (song_dur - 15):
                 print(f"[PlayerHub] Bỏ qua EOF non (mới phát {cur_elapsed}s / {song_dur}s) -> Giữ nguyên bài, Loa sẽ tự kết nối lại!")
+            elif song_dur == 0 and cur_elapsed < 120:
+                print(f"[PlayerHub] Bỏ qua EOF non (duration=0, mới phát {cur_elapsed}s < 120s) -> Giữ nguyên bài!")
             elif cur_elapsed < 10:
                 print(f"[PlayerHub] Bỏ qua EOF quá ngắn (elapsed={cur_elapsed}s < 10s)")
             else:
