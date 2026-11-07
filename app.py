@@ -113,8 +113,8 @@ def search():
         with _player_lock:
             _playlist = list(results)
             _playlist_idx = 0
+        _attach_b64_thumbs(results, 10, 32)
         _set_cache(cache_key, results)
-        _prewarm_thumbs(results, 32, sync_count=5)
         return jsonify(results)
     except Exception as e:
         print(f"[Search] Error: {e}")
@@ -393,6 +393,7 @@ def get_favorites():
     Trả về danh sách các bài hát yêu thích đã lưu trong CSDL SQLite
     """
     favs = db.get_favorites()
+    _attach_b64_thumbs(favs, 10, 32)
     return jsonify(favs)
 
 
@@ -445,8 +446,8 @@ def trending():
 
     try:
         results = PLATFORMS[platform].get_trending(limit=20)
+        _attach_b64_thumbs(results, 10, 32)
         _set_cache(cache_key, results)
-        _prewarm_thumbs(results, 32, sync_count=5)
         return jsonify(results)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -626,6 +627,7 @@ def recommendations():
 
         final_songs = collected_songs[:limit]
 
+        _attach_b64_thumbs(final_songs, 10, 32)
         res_payload = {
             "status": "ok",
             "platform": platform,
@@ -634,7 +636,6 @@ def recommendations():
             "songs": final_songs
         }
         _set_cache(cache_key, res_payload)
-        _prewarm_thumbs(final_songs, 32)
         return jsonify(res_payload)
     except Exception as e:
         print(f"[Recommendations] Error: {e}")
@@ -1059,6 +1060,25 @@ def _prewarm_thumbs(song_list, size=32, sync_count=5):
         threading.Thread(target=_bg_worker, daemon=True).start()
 
 
+def _attach_b64_thumbs(song_list, max_count=10, size=32):
+    """
+    Tải trước và đính kèm thumbnail base64 RGB565 trực tiếp vào danh sách bài hát.
+    ESP32 nhận được cả thông tin bài hát VÀ ảnh cùng một lúc, không cần gọi thêm HTTP!
+    """
+    if not song_list:
+        return
+    import base64
+    count = min(len(song_list), max_count)
+    _prewarm_thumbs(song_list, size, sync_count=count)
+    for s in song_list[:count]:
+        if isinstance(s, dict):
+            u = s.get("thumbnail") or ""
+            if u:
+                raw_rgb565 = _download_and_cache_thumbnail(u, size)
+                if raw_rgb565:
+                    s["thumb_b64"] = base64.b64encode(raw_rgb565).decode("ascii")
+
+
 @app.route("/api/thumbnail")
 def thumbnail():
     """
@@ -1431,6 +1451,7 @@ def player_queue_clear():
 def get_history():
     """GET /api/history -> Trả về tối đa 20 bài hát đã nghe gần nhất."""
     history = db.get_play_history(limit=20)
+    _attach_b64_thumbs(history, 10, 32)
     return jsonify(history)
 
 
