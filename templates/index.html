@@ -2234,6 +2234,9 @@
 
       try {
         const res = await fetch(`/api/recommendations?platform=${plat}&limit=10`);
+        if (!res.ok) {
+          throw new Error(`Server trả về HTTP ${res.status}. Vui lòng cập nhật code server trên VPS.`);
+        }
         const data = await res.json();
         const songs = Array.isArray(data) ? data : (data.songs || []);
         recommendedSongs = songs;

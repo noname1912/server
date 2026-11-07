@@ -461,6 +461,11 @@ def recommendations():
     platform = request.args.get("platform", "all").lower()
     limit = int(request.args.get("limit", 10))
 
+    cache_key = f"rec:{platform}:{limit}"
+    cached = _get_cache(cache_key, 120)
+    if cached is not None:
+        return jsonify(cached)
+
     try:
         from collections import Counter
         history = db.get_play_history(30)
@@ -598,13 +603,15 @@ def recommendations():
 
         final_songs = collected_songs[:limit]
 
-        return jsonify({
+        res_payload = {
             "status": "ok",
             "platform": platform,
             "taste": taste_summary,
             "reason": f"Dựa trên phong cách: {taste_summary}",
             "songs": final_songs
-        })
+        }
+        _set_cache(cache_key, res_payload)
+        return jsonify(res_payload)
     except Exception as e:
         print(f"[Recommendations] Error: {e}")
         return jsonify({"error": str(e), "songs": []}), 500
