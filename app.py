@@ -2420,18 +2420,29 @@ if __name__ == "__main__":
         local_ip = "127.0.0.1"
 
     port = int(os.environ.get("PORT", 5000))
+    ext_port = int(os.environ.get("EXT_PORT", 4954))
+
+    public_ip = local_ip
+    try:
+        import urllib.request
+        with urllib.request.urlopen("https://api.ipify.org", timeout=2.0) as r:
+            pip = r.read().decode().strip()
+            if pip and len(pip.split(".")) == 4:
+                public_ip = pip
+    except Exception:
+        pass
 
     print("=" * 60)
     print("  ESP32 Music Player Server v2")
     print("=" * 60)
+    print(f"  Public IP    : {public_ip}")
     print(f"  Internal Port: {port}")
-    print(f"  External Port (NAT mapped): 4954")
-    print(f"  External URL : http://51.15.20.170:4954")
+    print(f"  External URL : http://{public_ip}:{ext_port}")
     print("=" * 60)
     print("  Platforms: ZingMP3 | SoundCloud | YouTube")
     print()
     print("  Nhap vao config.h cua ESP32:")
-    print(f'     #define SERVER_IP   "51.15.20.170"')
-    print(f'     #define SERVER_PORT 4954')
+    print(f'     #define SERVER_IP   "{public_ip}"')
+    print(f'     #define SERVER_PORT {ext_port}')
     print("=" * 60)
     app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
