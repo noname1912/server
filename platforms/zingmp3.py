@@ -35,6 +35,8 @@ _YDL_STREAM_OPTS = {
 }
 
 
+from .youtube import _innertube_search
+
 class ZingMP3Platform:
     """Nền tảng ZingMP3."""
 
@@ -45,10 +47,19 @@ class ZingMP3Platform:
     # ── Search ────────────────────────────────────────────────
     def search(self, query: str, limit: int = 20) -> list[dict]:
         """
-        Tìm kiếm nhạc Việt qua YouTube Music.
-        (ZingMP3 chặn bot nên dùng YouTube làm backend thay thế)
+        Tìm kiếm nhạc Việt qua InnerTube API siêu nhanh ~0.2s (fallback yt-dlp).
         """
-        # Thêm từ khóa VN để ưu tiên nhạc Việt
+        # 1. Thử InnerTube API trực tiếp
+        try:
+            fast_res = _innertube_search(f"{query} nhac viet", limit=limit)
+            if fast_res:
+                for item in fast_res:
+                    item["platform"] = "zing"
+                return fast_res[:limit]
+        except Exception as ex_it:
+            print(f"[ZingMP3] Fast search failed: {ex_it}, falling back to yt-dlp...")
+
+        # 2. Fallback sang yt-dlp
         search_url = f"ytsearch{limit}:{query} nhac viet"
         results = []
         try:

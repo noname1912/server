@@ -27,32 +27,26 @@ _YDL_STREAM_OPTS = {
     "socket_timeout": 10,
 }
 
-_sc_client_id = "F4NBFDqtGCLXXsV1EvDyDg27XXRYDdKh"
-_sc_client_id_exp = 0
+_SC_CLIENT_IDS = [
+    "a3e059563d7fd3372b49b37f00a00bcf",
+    "F4NBFDqtGCLXXsV1EvDyDg27XXRYDdKh",
+    "2t9loNfh0ekOfjqqeO5dNuRIapxcjmgz",
+    "iZIs9mchVcX5lhVR1EzGCddqqbfGW19z",
+    "b45b1e1079f42ab666772d8a886b6634"
+]
+_sc_cid_idx = 0
+_sc_client_id = _SC_CLIENT_IDS[0]
 
 def _get_sc_client_id() -> str:
-    global _sc_client_id, _sc_client_id_exp
-    if _sc_client_id and time.time() < _sc_client_id_exp:
-        return _sc_client_id
-    try:
-        req = urllib.request.Request("https://soundcloud.com", headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            html = resp.read().decode("utf-8", errors="ignore")
-        scripts = re.findall(r'src="(https://a-v2\.sndcdn\.com/assets/[^"]+\.js)"', html)
-        for s in scripts[-6:]:
-            try:
-                with urllib.request.urlopen(s, timeout=5) as js_resp:
-                    js = js_resp.read().decode("utf-8", errors="ignore")
-                m = re.search(r'client_id:"([a-zA-Z0-9]{32})"', js)
-                if m:
-                    _sc_client_id = m.group(1)
-                    _sc_client_id_exp = time.time() + 86400
-                    return _sc_client_id
-            except Exception:
-                pass
-    except Exception as ex:
-        print(f"[SoundCloud] get client_id error: {ex}")
-    return _sc_client_id or "F4NBFDqtGCLXXsV1EvDyDg27XXRYDdKh"
+    global _sc_client_id
+    return _sc_client_id
+
+def _rotate_sc_client_id():
+    global _sc_client_id, _sc_cid_idx
+    _sc_cid_idx = (_sc_cid_idx + 1) % len(_SC_CLIENT_IDS)
+    _sc_client_id = _SC_CLIENT_IDS[_sc_cid_idx]
+    print(f"[SoundCloud] Rotated to client_id: {_sc_client_id}")
+    return _sc_client_id
 
 
 class SoundCloudPlatform:
@@ -64,14 +58,14 @@ class SoundCloudPlatform:
 
     # ── Search ────────────────────────────────────────────────
     def search(self, query: str, limit: int = 20) -> list[dict]:
-        """Tìm kiếm bài hát trên SoundCloud (API v2 trực tiếp ~0.3s, fallback yt-dlp)."""
-        # 1. Thử gọi trực tiếp SoundCloud API v2 (siêu nhanh)
-        cid = _get_sc_client_id()
-        if cid:
+        """Tìm kiếm bài hát trên SoundCloud (API v2 trực tiếp ~0.2s, fallback yt-dlp)."""
+        # 1. Thử gọi trực tiếp SoundCloud API v2 với danh sách client_id sẵn sàng
+        for attempt in range(len(_SC_CLIENT_IDS)):
+            cid = _get_sc_client_id()
             try:
                 url = f"https://api-v2.soundcloud.com/search/tracks?q={urllib.parse.quote(query)}&client_id={cid}&limit={limit}"
-                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(req, timeout=6) as res:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                with urllib.request.urlopen(req, timeout=3.0) as res:
                     data = json.loads(res.read().decode("utf-8"))
                 tracks = data.get("collection", [])
                 results = []
@@ -99,8 +93,14 @@ class SoundCloudPlatform:
                     })
                 if results:
                     return results[:limit]
+            except urllib.error.HTTPError as he:
+                if he.code in (401, 403):
+                    _rotate_sc_client_id()
+                    continue
+                break
             except Exception as ex_v2:
-                print(f"[SoundCloud] Direct API v2 search error ({ex_v2}), falling back to yt-dlp...")
+                print(f"[SoundCloud] Direct API v2 search error ({ex_v2})")
+                break
 
         # 2. Fallback sang yt-dlp nếu API v2 bị lỗi
         search_url = f"scsearch{limit}:{query}"

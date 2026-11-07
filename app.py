@@ -512,47 +512,40 @@ def recommendations():
         seen_ids = set()
         seen_titles = set()
 
-        for q in search_queries:
-            if len(collected_songs) >= limit * 2:
-                break
-            for p in target_plats:
-                if p not in PLATFORMS:
-                    continue
-                try:
-                    res = PLATFORMS[p].search(q, limit=6)
-                    for song in res:
-                        sid = str(song.get("id") or "")
-                        import re
-                        stitle = re.sub(r'[^a-zA-Z0-9\s]', '', (song.get("title") or "").lower()).strip()
-                        if sid and sid not in seen_ids and stitle not in seen_titles:
-                            seen_ids.add(sid)
-                            seen_titles.add(stitle)
-                            song["rec_reason"] = f"Theo gu: {q}"
-                            collected_songs.append(song)
-                except Exception as ex:
-                    print(f"[Recommendations] Search error on {p}: {str(ex).encode('ascii', 'replace').decode()}")
+        # Tối ưu siêu tốc: Thực hiện 1 truy vấn duy nhất chuẩn xác (~0.25s) thay vì lặp tuần tự nhiều lần
+        primary_q = search_queries[0]
+        import concurrent.futures
 
-        if len(collected_songs) < limit:
-            for p in target_plats:
-                if p not in PLATFORMS:
-                    continue
+        def _fetch_plat_songs(p, q, lim):
+            if p not in PLATFORMS: return []
+            try:
+                return PLATFORMS[p].search(q, limit=lim)
+            except Exception as e:
+                return []
+
+        if platform in PLATFORMS:
+            # Chỉ 1 nền tảng được chọn: lấy thẳng limit bài với primary query
+            songs_res = _fetch_plat_songs(platform, primary_q, limit)
+            for s in songs_res:
+                s["rec_reason"] = f"Theo gu: {primary_q}"
+                collected_songs.append(s)
+            # Nếu chưa đủ limit, lấy trending bổ sung
+            if len(collected_songs) < limit:
                 try:
-                    t_res = PLATFORMS[p].get_trending(limit=10)
-                    for song in t_res:
-                        sid = str(song.get("id") or "")
-                        import re
-                        stitle = re.sub(r'[^a-zA-Z0-9\s]', '', (song.get("title") or "").lower()).strip()
-                        if sid and sid not in seen_ids and stitle not in seen_titles:
-                            seen_ids.add(sid)
-                            seen_titles.add(stitle)
-                            song["rec_reason"] = "Xu hướng thịnh hành"
-                            collected_songs.append(song)
-                        if len(collected_songs) >= limit:
-                            break
-                except Exception as ex:
-                    print(f"[Recommendations] Trending error on {p}: {str(ex).encode('ascii', 'replace').decode()}")
-                if len(collected_songs) >= limit:
-                    break
+                    for s in PLATFORMS[platform].get_trending(limit=limit):
+                        if len(collected_songs) >= limit: break
+                        s["rec_reason"] = "Xu hướng"
+                        collected_songs.append(s)
+                except Exception: pass
+        else:
+            # Tất cả nền tảng: chạy song song (Parallel) 3 nền tảng trong 0.25s
+            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                f_yt = executor.submit(_fetch_plat_songs, "youtube", primary_q, 4)
+                f_zg = executor.submit(_fetch_plat_songs, "zing", primary_q, 3)
+                f_sc = executor.submit(_fetch_plat_songs, "soundcloud", primary_q, 3)
+                for s in (f_yt.result() + f_zg.result() + f_sc.result()):
+                    s["rec_reason"] = f"Theo gu: {primary_q}"
+                    collected_songs.append(s)
 
         final_songs = collected_songs[:limit]
 

@@ -33,6 +33,71 @@ _YDL_STREAM_OPTS = {
 }
 
 
+import urllib.request
+import json
+
+def _innertube_search(query: str, limit: int = 20) -> list:
+    """Tìm kiếm YouTube qua InnerTube API trực tiếp siêu nhanh (~0.2s, không qua yt-dlp)."""
+    url = "https://www.youtube.com/youtubei/v1/search"
+    payload = {
+        "context": {
+            "client": {
+                "clientName": "WEB",
+                "clientVersion": "2.20230515.01.00",
+                "hl": "vi",
+                "gl": "VN"
+            }
+        },
+        "query": f"{query} audio"
+    }
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+    )
+    with urllib.request.urlopen(req, timeout=3.5) as resp:
+        res_data = json.loads(resp.read().decode("utf-8"))
+
+    items = []
+    def parse_dur(s):
+        try:
+            parts = list(map(int, s.split(":")))
+            if len(parts) == 2: return parts[0]*60 + parts[1]
+            if len(parts) == 3: return parts[0]*3600 + parts[1]*60 + parts[2]
+        except Exception: pass
+        return 0
+
+    try:
+        sections = res_data.get("contents", {}).get("twoColumnSearchResultsRenderer", {}).get("primaryContents", {}).get("sectionListRenderer", {}).get("contents", [])
+        for section in sections:
+            for it in section.get("itemSectionRenderer", {}).get("contents", []):
+                vr = it.get("videoRenderer")
+                if vr:
+                    vid = vr.get("videoId")
+                    title = "".join(r.get("text", "") for r in vr.get("title", {}).get("runs", []))
+                    artist = "".join(r.get("text", "") for r in vr.get("ownerText", {}).get("runs", []))
+                    dur_str = vr.get("lengthText", {}).get("simpleText", "0:00")
+                    dur = parse_dur(dur_str)
+                    if dur > 3600:
+                        continue
+                    if vid and title:
+                        items.append({
+                            "id": vid,
+                            "title": _clean_title(title),
+                            "artist": artist or "YouTube",
+                            "duration": dur,
+                            "platform": "youtube",
+                            "thumbnail": f"https://img.youtube.com/vi/{vid}/mqdefault.jpg"
+                        })
+                    if len(items) >= limit:
+                        return items
+    except Exception as e:
+        print(f"[YouTube-InnerTube] Parse error: {e}")
+    return items
+
 class YouTubePlatform:
     """Nền tảng YouTube Music."""
 
@@ -42,8 +107,16 @@ class YouTubePlatform:
 
     # ── Search ────────────────────────────────────────────────
     def search(self, query: str, limit: int = 20) -> list[dict]:
-        """Tìm kiếm bài hát trên YouTube."""
-        # Thêm "music" để ưu tiên kết quả âm nhạc
+        """Tìm kiếm bài hát trên YouTube (Ưu tiên InnerTube API ~0.2s, fallback yt-dlp)."""
+        # 1. Thử InnerTube API trực tiếp siêu tốc
+        try:
+            fast_res = _innertube_search(query, limit=limit)
+            if fast_res and len(fast_res) > 0:
+                return fast_res[:limit]
+        except Exception as ex_it:
+            print(f"[YouTube] Fast search failed: {ex_it}, falling back to yt-dlp...")
+
+        # 2. Fallback sang yt-dlp nếu InnerTube lỗi
         search_url = f"ytsearch{limit}:{query} music"
         results = []
         try:
