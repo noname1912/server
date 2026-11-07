@@ -697,13 +697,21 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
         if ref:
             headers_str += f"Referer: {ref}\r\n"
 
+        is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower())
+
         cmd = [
             "ffmpeg",
             "-y",
-            "-loglevel", "quiet",
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
+            "-loglevel", "error",
+        ]
+        # reconnect options chi hop le voi giao thuc HTTP truc tiep, khong ap dung cho HLS demuxer
+        if not is_m3u8:
+            cmd.extend([
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "5",
+            ])
+        cmd.extend([
             "-headers", headers_str,
             "-thread_queue_size", "4096",
             "-i", audio_url,
@@ -716,7 +724,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
             "-f", "mp3",
             "-write_xing", "0",
             str(tmp_mp3)
-        ]
+        ])
         try:
             proc = subprocess.Popen(cmd)
             _active_transcodes[cache_key] = proc
@@ -848,7 +856,7 @@ def stream_audio(platform: str, song_id: str):
         curr_file = None
         while time.time() - t0 < 8.0:
             target = final_p if final_p.exists() else tmp_p
-            if target.exists() and target.stat().st_size >= 4096:
+            if target.exists() and target.stat().st_size >= 1024:
                 curr_file = target
                 break
             if p and p.poll() is not None:
@@ -1105,13 +1113,55 @@ def thumbnails_batch():
     size = max(16, min(size, 80))
     block_len = size * size * 2
 
-    out = bytearray()
-    for u in urls:
-        plat_hint = "soundcloud" if ("sndcdn" in u or "soundcloud" in u) else ("zing" if "zing" in u else "youtube")
-        raw_rgb = _download_and_cache_thumbnail(u, size) if u else None
-        if raw_rgb and len(raw_rgb) == block_len:
-            out.extend(raw_rgb)
+    if not urls:
+        return Response(b"", status=200, mimetype="application/octet-stream")
+
+    # 1. Kiểm tra cache RAM trước
+    results = [None] * len(urls)
+    missing_indices = []
+    for i, u in enumerate(urls):
+        if not u or not u.startswith("http"):
+            continue
+        ck = f"{u}:{size}"
+        with _thumb_lock:
+            cached = _thumb_cache.get(ck)
+        if cached and len(cached) == block_len:
+            results[i] = cached
         else:
+            missing_indices.append(i)
+
+    # 2. Nếu có ảnh chưa có trong cache, tải SONG SONG đa luồng với timeout tối đa 1.0s
+    if missing_indices:
+        import concurrent.futures
+        def _fetch_one(idx):
+            u = urls[idx]
+            try:
+                raw_rgb = _download_and_cache_thumbnail(u, size)
+                if raw_rgb and len(raw_rgb) == block_len:
+                    return idx, raw_rgb
+            except Exception:
+                pass
+            return idx, None
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(missing_indices), 6)) as ex:
+            futures = [ex.submit(_fetch_one, idx) for idx in missing_indices]
+            done, not_done = concurrent.futures.wait(futures, timeout=1.0)
+            for f in done:
+                try:
+                    idx, rgb = f.result()
+                    if rgb:
+                        results[idx] = rgb
+                except Exception:
+                    pass
+
+    # 3. Gom dữ liệu: nếu ảnh nào chưa tải kịp thì dùng fallback tức thì (0.01ms)
+    out = bytearray()
+    for i, u in enumerate(urls):
+        rgb = results[i]
+        if rgb and len(rgb) == block_len:
+            out.extend(rgb)
+        else:
+            plat_hint = "soundcloud" if ("sndcdn" in u or "soundcloud" in u) else ("zing" if "zing" in u else "youtube")
             fallback = _make_fallback_rgb565(size, plat_hint)
             out.extend(fallback)
 
