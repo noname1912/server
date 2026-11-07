@@ -723,6 +723,16 @@ def recommendations():
         }
         _set_cache(cache_key, res_payload)
         threading.Thread(target=_prewarm_thumbs, args=(final_songs, 32, 5), daemon=True).start()
+        def _prewarm_all_streams():
+            for s in final_songs:
+                p = s.get("platform") or platform
+                sid = str(s.get("id"))
+                if p in PLATFORMS and sid and not _get_stream_cache(f"{p}:{sid}"):
+                    try:
+                        u = PLATFORMS[p].get_stream_url(sid)
+                        if u: _set_stream_cache(f"{p}:{sid}", u)
+                    except Exception: pass
+        threading.Thread(target=_prewarm_all_streams, daemon=True).start()
         return jsonify(res_payload)
     except Exception as e:
         print(f"[Recommendations] Error: {e}")
@@ -919,34 +929,66 @@ def stream_audio(platform: str, song_id: str):
     import shutil
     has_ffmpeg = bool(shutil.which("ffmpeg"))
     is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower())
+    is_direct_mp3 = (not is_m3u8) and (
+        platform == "zing" or
+        ".mp3" in audio_url.lower() or
+        "progressive" in audio_url.lower() or
+        "/stream/mp3" in audio_url.lower()
+    )
 
-    # Nếu không có FFmpeg trên server:
-    if not has_ffmpeg:
-        if is_m3u8:
-            print(f"[Stream-Error] URL is HLS/m3u8 but FFmpeg is not installed on server: {audio_url[:60]}")
+    # 3A. NẾU LÀ MP3 TRỰC TIẾP (ZingMP3 / SoundCloud MP3) -> PROXY THẲNG 0ms LATENCY (Không cần FFmpeg!)
+    if is_direct_mp3 or not has_ffmpeg:
+        if is_m3u8 and not has_ffmpeg:
             abort(500, "Server missing FFmpeg for HLS transcoding")
-        print(f"[Stream] Direct Proxy (no-ffmpeg) for {platform}:{song_id}")
-        def generate_direct():
-            req = urllib.request.Request(
-                audio_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                    "Referer": _get_referer(platform),
-                }
-            )
-            with urllib.request.urlopen(req, timeout=12) as src_resp:
-                while True:
-                    buf = src_resp.read(16384)
-                    if not buf:
-                        break
-                    yield buf
+        print(f"[Stream-FastDirect] Phát trực tiếp siêu tốc 0ms cho {platform}:{song_id}")
+        def generate_direct_stream():
+            f_cache = None
+            try:
+                if tmp_mp3.exists():
+                    try: tmp_mp3.unlink()
+                    except Exception: pass
+                f_cache = open(tmp_mp3, "wb")
+            except Exception:
+                pass
+            try:
+                req = urllib.request.Request(
+                    audio_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                        "Referer": _get_referer(platform),
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=15) as src_resp:
+                    while True:
+                        buf = src_resp.read(2048)
+                        if not buf:
+                            break
+                        if f_cache:
+                            try: f_cache.write(buf)
+                            except Exception: pass
+                        yield buf
+                if f_cache:
+                    f_cache.close()
+                    f_cache = None
+                    if tmp_mp3.exists() and tmp_mp3.stat().st_size > 300000:
+                        if final_mp3.exists():
+                            try: final_mp3.unlink()
+                            except Exception: pass
+                        tmp_mp3.rename(final_mp3)
+                        print(f"[Stream-Cache] Direct cache complete: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
+                        _cleanup_old_cache(60)
+            except Exception as ex_dir:
+                print(f"[Stream-Direct] Error: {ex_dir}")
+            finally:
+                if f_cache and not f_cache.closed:
+                    try: f_cache.close()
+                    except Exception: pass
 
-        content_type = "audio/mpeg" if platform == "soundcloud" else "audio/mp4"
         return Response(
-            stream_with_context(generate_direct()),
+            stream_with_context(generate_direct_stream()),
             status=200,
             headers={
-                "Content-Type": content_type,
+                "Content-Type": "audio/mpeg",
                 "Cache-Control": "no-cache",
                 "Accept-Ranges": "none",
                 "Access-Control-Allow-Origin": "*",
@@ -954,7 +996,7 @@ def stream_audio(platform: str, song_id: str):
             direct_passthrough=True,
         )
 
-    # 3. Phát trực tiếp qua FFmpeg Pipe: Sub-50ms latency, 0% CPU spike, tự động đệm vào SSD cache
+    # 3B. NẾU LÀ HLS / YOUTUBE -> FFMPEG PIPE LOW-LATENCY (Buffer 2KB)
     headers_str = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
     ref = _get_referer(platform)
     if ref:
@@ -1003,10 +1045,10 @@ def stream_audio(platform: str, song_id: str):
         proc = None
         first_chunk = True
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=8192)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=4096)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             while True:
-                chunk = proc.stdout.read(4096)
+                chunk = proc.stdout.read(2048)
                 if not chunk:
                     if first_chunk:
                         print(f"[Stream-Pipe] Warning: First chunk is empty for {cache_key}! Invalidating cache and retrying...")
@@ -1021,10 +1063,10 @@ def stream_audio(platform: str, song_id: str):
                                     if arg_c == audio_url:
                                         retry_cmd[idx_c] = fresh_url
                                         break
-                                proc_retry = subprocess.Popen(retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=8192)
+                                proc_retry = subprocess.Popen(retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=4096)
                                 proc = proc_retry
                                 while True:
-                                    chunk_r = proc.stdout.read(4096)
+                                    chunk_r = proc.stdout.read(2048)
                                     if not chunk_r:
                                         break
                                     if f_cache:
@@ -1063,6 +1105,7 @@ def stream_audio(platform: str, song_id: str):
                 except Exception: pass
             if proc and proc.poll() is None:
                 try: proc.kill()
+                except Exception: pass
                 except Exception: pass
                 except Exception: pass
 
@@ -2407,7 +2450,7 @@ def get_wallpaper_info():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "version": "2.5-purestream"})
+    return jsonify({"status": "ok", "version": "2.6-instant"})
 
 
 @app.route("/api/cache/clear", methods=["GET", "POST"])
