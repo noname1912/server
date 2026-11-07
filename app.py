@@ -44,9 +44,30 @@ app = Flask(__name__)
 CORS(app)
 db.init_db()
 
-# ─── Cache đơn giản cho stream URLs (tránh gọi API nhiều lần) ──
-_stream_cache: dict[str, str] = {}
+# ─── Cache đơn giản cho stream URLs với TTL 10 phút (tránh link CloudFront/YouTube hết hạn) ──
+_stream_cache: dict[str, tuple[str, float]] = {}
 _cache_lock = threading.Lock()
+
+def _get_stream_cache(key: str) -> str | None:
+    with _cache_lock:
+        item = _stream_cache.get(key)
+        if not item:
+            return None
+        url, ts = item
+        if time.time() - ts > 600:  # 10 phút TTL
+            _stream_cache.pop(key, None)
+            return None
+        return url
+
+def _set_stream_cache(key: str, url: str):
+    with _cache_lock:
+        if len(_stream_cache) > 200:
+            _stream_cache.clear()
+        _stream_cache[key] = (url, time.time())
+
+def _del_stream_cache(key: str):
+    with _cache_lock:
+        _stream_cache.pop(key, None)
 
 # ───────────────────────────────────────────────────────────────
 
@@ -798,18 +819,14 @@ def stream_audio(platform: str, song_id: str):
     # 2. NẾU CHƯA CÓ TRONG CACHE:
     # Lấy stream URL gốc
     cache_key = f"{platform}:{song_id}"
-    with _cache_lock:
-        audio_url = _stream_cache.get(cache_key)
+    audio_url = _get_stream_cache(cache_key)
 
     if not audio_url:
         print(f"[Stream] Fetching URL for {platform}:{song_id}")
         audio_url = PLATFORMS[platform].get_stream_url(song_id)
         if not audio_url:
             abort(404, "Cannot get stream URL")
-        with _cache_lock:
-            if len(_stream_cache) > 100:
-                _stream_cache.clear()
-            _stream_cache[cache_key] = audio_url
+        _set_stream_cache(cache_key, audio_url)
 
     import shutil
     has_ffmpeg = bool(shutil.which("ffmpeg"))
@@ -893,13 +910,18 @@ def stream_audio(platform: str, song_id: str):
             pass
 
         proc = None
+        first_chunk = True
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32768)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             while True:
                 chunk = proc.stdout.read(16384)
                 if not chunk:
+                    if first_chunk:
+                        print(f"[Stream-Pipe] Warning: First chunk is empty for {cache_key}! Invaliding cache...")
+                        _del_stream_cache(cache_key)
                     break
+                first_chunk = False
                 if f_cache:
                     try: f_cache.write(chunk)
                     except Exception: pass
@@ -1031,7 +1053,7 @@ def _download_and_cache_thumbnail(url: str, size: int = 32) -> bytes:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://soundcloud.com/",
             "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-        }, timeout=1.2, verify=False)
+        }, timeout=3.0, verify=False)
         if r.status_code == 200 and len(r.content) > 100:
             raw = r.content
     except Exception:
@@ -1058,7 +1080,7 @@ def _download_and_cache_thumbnail(url: str, size: int = 32) -> bytes:
     try:
         data = _process_image_to_rgb565(raw, size)
         with _thumb_lock:
-            if len(_thumb_cache) > 300:
+            if len(_thumb_cache) > 1000:
                 _thumb_cache.clear()
             _thumb_cache[cache_key] = data
         return data
@@ -1092,7 +1114,7 @@ def _prewarm_thumbs(song_list, size=32, sync_count=5):
         from concurrent.futures import ThreadPoolExecutor, wait
         with ThreadPoolExecutor(max_workers=min(len(sync_urls), 5)) as pool:
             futures = [pool.submit(_download_and_cache_thumbnail, u, size) for u in sync_urls]
-            wait(futures, timeout=1.8)
+            wait(futures, timeout=3.0)
 
     if rest_urls:
         def _bg_worker():
@@ -1139,7 +1161,7 @@ def thumbnails_batch():
         else:
             missing_indices.append(i)
 
-    # 2. Nếu có ảnh chưa có trong cache, tải SONG SONG đa luồng với timeout tối đa 1.0s
+    # 2. Nếu có ảnh chưa có trong cache, tải SONG SONG đa luồng với timeout tối đa 3.5s
     if missing_indices:
         import concurrent.futures
         def _fetch_one(idx):
@@ -1155,7 +1177,7 @@ def thumbnails_batch():
         ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(missing_indices), 6))
         try:
             futures = [ex.submit(_fetch_one, idx) for idx in missing_indices]
-            done, not_done = concurrent.futures.wait(futures, timeout=1.0)
+            done, not_done = concurrent.futures.wait(futures, timeout=3.5)
             for f in done:
                 try:
                     idx, rgb = f.result()
@@ -1275,9 +1297,8 @@ def _auto_play_next(from_user: bool = False) -> bool:
         safe_id = song_id
 
     # Xóa cache của bài tiếp theo để luôn lấy stream URL tươi mới
-    with _cache_lock:
-        _stream_cache.pop(f"{platform}:{song_id}", None)
-        _stream_cache.pop(f"{platform}:{safe_id}", None)
+    _del_stream_cache(f"{platform}:{song_id}")
+    _del_stream_cache(f"{platform}:{safe_id}")
 
     # Pre-warm stream URL của bài tiếp theo
     def _prewarm_next(plat=platform, sid=song_id, sfid=safe_id):
@@ -1286,10 +1307,8 @@ def _auto_play_next(from_user: bool = False) -> bool:
             if p_obj and hasattr(p_obj, "get_stream_url"):
                 fresh = p_obj.get_stream_url(sid)
                 if fresh:
-                    with _cache_lock:
-                        _stream_cache[f"{plat}:{sid}"] = fresh
-                        _stream_cache[f"{plat}:{sfid}"] = fresh
-                    pass
+                    _set_stream_cache(f"{plat}:{sid}", fresh)
+                    _set_stream_cache(f"{plat}:{sfid}", fresh)
                     print(f"[PlayerHub] Pre-warmed next URL for {plat}:{sid}")
         except Exception as ex_pw:
             print(f"[PlayerHub] Pre-warm next error: {ex_pw}")
@@ -1366,17 +1385,14 @@ def player_play():
     # Kích hoạt phân giải stream & transcode ngầm song song (Background) không làm nghẽn phản hồi
     def _bg_prewarm():
         try:
-            fresh_url = None
-            with _cache_lock:
-                fresh_url = _stream_cache.get(f"{platform}:{song_id}") or _stream_cache.get(f"{platform}:{safe_id}")
+            fresh_url = _get_stream_cache(f"{platform}:{song_id}") or _get_stream_cache(f"{platform}:{safe_id}")
             if not fresh_url:
                 p_obj = PLATFORMS.get(platform)
                 if p_obj and hasattr(p_obj, "get_stream_url"):
                     fresh_url = p_obj.get_stream_url(song_id)
                     if fresh_url:
-                        with _cache_lock:
-                            _stream_cache[f"{platform}:{song_id}"] = fresh_url
-                            _stream_cache[f"{platform}:{safe_id}"] = fresh_url
+                        _set_stream_cache(f"{platform}:{song_id}", fresh_url)
+                        _set_stream_cache(f"{platform}:{safe_id}", fresh_url)
             # Luồng phát live stream qua pipe sẽ tự động transcode và đệm SSD khi client bắt đầu kéo nhạc
             pass
         except Exception as ex_pw:
