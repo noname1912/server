@@ -651,7 +651,11 @@ def _get_cache_paths(platform: str, song_id: str):
 # ─── Stream Audio ───────────────────────────────────────────────
 
 def _start_transcode_background(platform: str, song_id: str, audio_url: str):
-    """Kích hoạt transcode FFmpeg ngầm trước ngay khi chọn bài, để khi Loa ESP32 kết nối tới là có file phát ngay lập tức không bị delay/rỗng"""
+    """Kích hoạt transcode FFmpeg ngầm trước nếu hệ thống có cài FFmpeg"""
+    import shutil
+    if not shutil.which("ffmpeg"):
+        return  # Không có FFmpeg -> phat stream truc tiep, khong transcode
+
     final_mp3, tmp_mp3 = _get_cache_paths(platform, song_id)
     if final_mp3.exists() and final_mp3.stat().st_size > 20000:
         return
@@ -659,7 +663,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
     with _transcode_lock:
         proc = _active_transcodes.get(cache_key)
         if proc is not None and proc.poll() is None:
-            return  # Đang chạy rồi
+            return
         if tmp_mp3.exists():
             try: tmp_mp3.unlink()
             except Exception: pass
@@ -687,9 +691,9 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
         try:
             proc = subprocess.Popen(cmd)
             _active_transcodes[cache_key] = proc
-            print(f"[Stream-Prewarm] Đã kích hoạt transcode trước cho {cache_key}")
+            print(f"[Stream-Prewarm] Background transcode started for {cache_key}")
         except Exception as e:
-            print(f"[Stream-Prewarm] Lỗi khởi động FFmpeg: {e}")
+            print(f"[Stream-Prewarm] FFmpeg start error: {e}")
             return
 
         def _watch_transcode(p=proc, tmp_p=tmp_mp3, final_p=final_mp3, ckey=cache_key):
@@ -752,40 +756,6 @@ def stream_audio(platform: str, song_id: str):
         return send_file(str(final_mp3), mimetype="audio/mpeg", conditional=True)
 
     # 2. NẾU CHƯA CÓ TRONG CACHE:
-    # Với SoundCloud, stream URL đã là MP3 128kbps chuẩn, phát thẳng qua proxy trong 0.1s không cần qua FFmpeg
-    if platform == "soundcloud":
-        cache_key = f"{platform}:{song_id}"
-        with _cache_lock:
-            audio_url = _stream_cache.get(cache_key)
-        if not audio_url:
-            audio_url = PLATFORMS["soundcloud"].get_stream_url(song_id)
-            if audio_url:
-                with _cache_lock:
-                    _stream_cache[cache_key] = audio_url
-        if audio_url:
-            print(f"[Stream] Instant direct SoundCloud proxy: {song_id}")
-            def generate_sc():
-                req = urllib.request.Request(
-                    audio_url,
-                    headers={"User-Agent": "Mozilla/5.0", "Referer": "https://soundcloud.com/"}
-                )
-                with urllib.request.urlopen(req, timeout=8) as sc_resp:
-                    while True:
-                        buf = sc_resp.read(8192)
-                        if not buf: break
-                        yield buf
-            return Response(
-                stream_with_context(generate_sc()),
-                status=200,
-                headers={
-                    "Content-Type": "audio/mpeg",
-                    "Cache-Control": "no-cache",
-                    "Accept-Ranges": "none",
-                    "Access-Control-Allow-Origin": "*",
-                },
-                direct_passthrough=True
-            )
-
     # Lấy stream URL gốc
     cache_key = f"{platform}:{song_id}"
     with _cache_lock:
@@ -801,18 +771,49 @@ def stream_audio(platform: str, song_id: str):
                 _stream_cache.clear()
             _stream_cache[cache_key] = audio_url
 
-    print(f"[Stream] Caching & streaming: {platform}:{song_id} -> {tmp_mp3.name}")
+    import shutil
+    has_ffmpeg = bool(shutil.which("ffmpeg"))
 
-    # Bắt đầu transcode ghi vào tmp_mp3 với tốc độ tối đa (unthrottled)
+    # Nếu không có FFmpeg hoặc là SoundCloud: Phát trực tiếp siêu tốc (Instant Direct Proxy) trong 0.05s
+    if not has_ffmpeg or platform == "soundcloud":
+        print(f"[Stream] Instant Direct Proxy (no-ffmpeg) for {platform}:{song_id}")
+        def generate_direct():
+            req = urllib.request.Request(
+                audio_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Referer": _get_referer(platform),
+                }
+            )
+            with urllib.request.urlopen(req, timeout=12) as src_resp:
+                while True:
+                    buf = src_resp.read(16384)
+                    if not buf:
+                        break
+                    yield buf
+
+        content_type = "audio/mpeg" if platform == "soundcloud" else "audio/mp4"
+        return Response(
+            stream_with_context(generate_direct()),
+            status=200,
+            headers={
+                "Content-Type": content_type,
+                "Cache-Control": "no-cache",
+                "Accept-Ranges": "none",
+                "Access-Control-Allow-Origin": "*",
+            },
+            direct_passthrough=True,
+        )
+
+    # Nếu có FFmpeg: Bắt đầu transcode và phát progressive
     _start_transcode_background(platform, song_id, audio_url)
     with _transcode_lock:
         proc = _active_transcodes.get(cache_key)
 
     def generate_progressive(tmp_p=tmp_mp3, p=proc, final_p=final_mp3):
-        # Chờ tối đa 15 giây cho tới khi có ít nhất 64KB dữ liệu (~4s nhạc) để đệm ban đầu thật dày chống giật
         t0 = time.time()
         curr_file = None
-        while time.time() - t0 < 15.0:
+        while time.time() - t0 < 6.0:
             target = final_p if final_p.exists() else tmp_p
             if target.exists() and target.stat().st_size >= 4096:
                 curr_file = target
@@ -822,28 +823,23 @@ def stream_audio(platform: str, song_id: str):
                 if target.exists() and target.stat().st_size > 0:
                     curr_file = target
                     break
-                print("[Stream] Transcode failed or produced empty file -> Chuyen sang phat truc tiep")
                 break
-            time.sleep(0.05)
+            time.sleep(0.04)
 
         if not curr_file or not curr_file.exists():
-            print(f"[Stream] Fallback: Phat stream truc tiep tu URL goc: {audio_url[:60]}...")
-            try:
-                req = urllib.request.Request(
-                    audio_url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                        "Referer": _get_referer(platform),
-                    }
-                )
-                with urllib.request.urlopen(req, timeout=12) as src_resp:
-                    while True:
-                        buf = src_resp.read(16384)
-                        if not buf:
-                            break
-                        yield buf
-            except Exception as ex_proxy:
-                print(f"[Stream] Direct fallback stream error: {ex_proxy}")
+            # Fallback trực tiếp nếu FFmpeg bị chậm
+            req = urllib.request.Request(
+                audio_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Referer": _get_referer(platform),
+                }
+            )
+            with urllib.request.urlopen(req, timeout=12) as src_resp:
+                while True:
+                    buf = src_resp.read(16384)
+                    if not buf: break
+                    yield buf
             return
 
         try:
@@ -856,11 +852,10 @@ def stream_audio(platform: str, song_id: str):
                         if p and p.poll() is not None:
                             while True:
                                 rem = f.read(16384)
-                                if not rem:
-                                    break
+                                if not rem: break
                                 yield rem
                             break
-                        time.sleep(0.05)
+                        time.sleep(0.04)
         except Exception:
             pass
 
