@@ -2320,7 +2320,7 @@ if __name__ == "__main__":
     print("=" * 60)
     print("  Platforms: ZingMP3 | SoundCloud | YouTube")
     print()
-    print("  📋 Nhập vào config.h của ESP32:")
+    print("  Nhap vao config.h cua ESP32:")
     print(f'     #define SERVER_IP   "51.15.20.170"')
     print(f'     #define SERVER_PORT 4954')
     print("=" * 60)
