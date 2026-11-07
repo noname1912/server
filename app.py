@@ -727,9 +727,18 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
             "ffmpeg",
             "-y",
             "-loglevel", "error",
+            "-rw_timeout", "8000000",
+            "-probesize", "32768",
+            "-analyzeduration", "500000",
+            "-fflags", "nobuffer+fastseek+flush_packets",
+            "-flags", "low_delay",
         ]
         # reconnect options chi hop le voi giao thuc HTTP truc tiep, khong ap dung cho HLS demuxer
-        if not is_m3u8:
+        if is_m3u8:
+            cmd.extend([
+                "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            ])
+        else:
             cmd.extend([
                 "-reconnect", "1",
                 "-reconnect_streamed", "1",
@@ -925,8 +934,30 @@ def stream_audio(platform: str, song_id: str):
                 chunk = proc.stdout.read(4096)
                 if not chunk:
                     if first_chunk:
-                        print(f"[Stream-Pipe] Warning: First chunk is empty for {cache_key}! Invaliding cache...")
+                        print(f"[Stream-Pipe] Warning: First chunk is empty for {cache_key}! Invalidating cache and retrying...")
                         _del_stream_cache(cache_key)
+                        try:
+                            fresh_url = PLATFORMS[platform].get_stream_url(song_id)
+                            if fresh_url and fresh_url != audio_url:
+                                print(f"[Stream-Pipe] Retrying with fresh URL for {cache_key}")
+                                _set_stream_cache(cache_key, fresh_url)
+                                retry_cmd = list(cmd)
+                                for idx_c, arg_c in enumerate(retry_cmd):
+                                    if arg_c == audio_url:
+                                        retry_cmd[idx_c] = fresh_url
+                                        break
+                                proc_retry = subprocess.Popen(retry_cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=8192)
+                                proc = proc_retry
+                                while True:
+                                    chunk_r = proc.stdout.read(4096)
+                                    if not chunk_r:
+                                        break
+                                    if f_cache:
+                                        try: f_cache.write(chunk_r)
+                                        except Exception: pass
+                                    yield chunk_r
+                        except Exception as ex_retry:
+                            print(f"[Stream-Pipe] Retry error: {ex_retry}")
                     break
                 first_chunk = False
                 if f_cache:
