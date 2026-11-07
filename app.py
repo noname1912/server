@@ -583,19 +583,67 @@ def recommendations():
                 return []
 
         if platform in PLATFORMS:
-            # Chỉ 1 nền tảng được chọn: lấy thẳng limit bài với primary query
-            songs_res = _fetch_plat_songs(platform, primary_q, limit)
-            for s in songs_res:
-                s["rec_reason"] = f"Theo gu: {primary_q}"
-                collected_songs.append(s)
-            # Nếu chưa đủ limit, lấy trending bổ sung
-            if len(collected_songs) < limit:
-                try:
-                    for s in PLATFORMS[platform].get_trending(limit=limit):
-                        if len(collected_songs) >= limit: break
-                        s["rec_reason"] = "Xu hướng"
-                        collected_songs.append(s)
+            # Lấy đa dạng nguồn song song trong 1.2s:
+            # 1. Bài theo primary_q (gu nghệ sĩ/thể loại)
+            # 2. Bài theo secondary_q (thể loại hot khác hoặc nghệ sĩ 2 hoặc "Top Hot TikTok")
+            # 3. Bài theo trending thịnh hành
+            sec_q = search_queries[1] if len(search_queries) > 1 else (top_genres[0] if top_genres else "Hot V-Pop")
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+            try:
+                f_pri = executor.submit(_fetch_plat_songs, platform, primary_q, 6)
+                f_sec = executor.submit(_fetch_plat_songs, platform, sec_q, 6)
+                f_trd = executor.submit(lambda: PLATFORMS[platform].get_trending(limit=6))
+
+                pri_songs = []
+                sec_songs = []
+                trd_songs = []
+                try: pri_songs = f_pri.result(timeout=1.2) or []
                 except Exception: pass
+                try: sec_songs = f_sec.result(timeout=1.2) or []
+                except Exception: pass
+                try: trd_songs = f_trd.result(timeout=1.2) or []
+                except Exception: pass
+
+                # Đa dạng hóa: Giới hạn tối đa 2 bài trên 1 nghệ sĩ để danh sách không bị trùng lặp
+                artist_tally = Counter()
+                def _add_song(s, reason):
+                    sid = str(s.get("id"))
+                    stitle = (s.get("title") or "").strip().lower()
+                    sart = (s.get("artist") or "").strip().lower()
+                    if not sid or sid in seen_ids: return False
+                    if stitle in seen_titles: return False
+                    if sart and sart not in ("unknown", "") and artist_tally[sart] >= 2:
+                        return False
+                    seen_ids.add(sid)
+                    seen_titles.add(stitle)
+                    if sart: artist_tally[sart] += 1
+                    s["rec_reason"] = reason
+                    collected_songs.append(s)
+                    return True
+
+                # Trộn xen kẽ: 1 gu cá nhân, 1 trending, 1 khám phá mới
+                max_len = max(len(pri_songs), len(sec_songs), len(trd_songs))
+                for idx in range(max_len):
+                    if idx < len(pri_songs): _add_song(pri_songs[idx], f"Theo gu: {primary_q}")
+                    if len(collected_songs) >= limit: break
+                    if idx < len(trd_songs): _add_song(trd_songs[idx], "Thịnh hành BXH")
+                    if len(collected_songs) >= limit: break
+                    if idx < len(sec_songs): _add_song(sec_songs[idx], f"Gợi ý: {sec_q}")
+                    if len(collected_songs) >= limit: break
+
+                # Nếu vẫn chưa đủ limit, nạp thêm từ các bài còn lại
+                for pool, reas in [(pri_songs, "Gợi ý"), (sec_songs, "Khám phá"), (trd_songs, "Xu hướng")]:
+                    for s in pool:
+                        if len(collected_songs) >= limit: break
+                        sid = str(s.get("id"))
+                        stitle = (s.get("title") or "").strip().lower()
+                        if sid not in seen_ids and stitle not in seen_titles:
+                            seen_ids.add(sid)
+                            seen_titles.add(stitle)
+                            s["rec_reason"] = reas
+                            collected_songs.append(s)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
         else:
             # Tất cả nền tảng: Lấy đủ 10 bài YouTube siêu tốc (~0.2s) làm nòng cốt
             # và song song lấy thêm bài SoundCloud/Zing trong 0.8s tối đa để trộn đều
