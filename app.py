@@ -2475,18 +2475,19 @@ def debug_test_ffmpeg(song_id):
     ])
     try:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
-        chunk = p.stdout.read(4096)
-        _, err = p.communicate(timeout=5)
-        p.terminate()
+        out, err = p.communicate(timeout=6)
         return jsonify({
             "status": "ok",
             "fetch_time": t_fetch,
             "url_prefix": url[:80],
-            "chunk_len": len(chunk),
-            "stderr": err.decode("utf-8", errors="ignore")[-500:],
+            "chunk_len": len(out),
+            "returncode": p.returncode,
+            "stderr": err.decode("utf-8", errors="ignore")[-800:],
             "elapsed": round(time.time() - t0, 2)
         })
     except Exception as e:
+        if 'p' in locals():
+            p.kill()
         return jsonify({"error": str(e), "elapsed": round(time.time() - t0, 2)})
 
 
