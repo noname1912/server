@@ -877,9 +877,16 @@ def stream_audio(platform: str, song_id: str):
         "-y",
         "-loglevel", "error",
         "-rw_timeout", "8000000",
-        "-analyzeduration", "1000000",
+        "-probesize", "32768",
+        "-analyzeduration", "500000",
+        "-fflags", "nobuffer+fastseek+flush_packets",
+        "-flags", "low_delay",
     ]
-    if not is_m3u8:
+    if is_m3u8:
+        cmd.extend([
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+        ])
+    else:
         cmd.extend([
             "-reconnect", "1",
             "-reconnect_streamed", "1",
@@ -912,10 +919,10 @@ def stream_audio(platform: str, song_id: str):
         proc = None
         first_chunk = True
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32768)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=8192)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             while True:
-                chunk = proc.stdout.read(16384)
+                chunk = proc.stdout.read(4096)
                 if not chunk:
                     if first_chunk:
                         print(f"[Stream-Pipe] Warning: First chunk is empty for {cache_key}! Invaliding cache...")
@@ -2289,7 +2296,7 @@ def get_wallpaper_info():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "version": "2.2-fast"})
+    return jsonify({"status": "ok", "version": "2.3-ultrafast"})
 
 
 @app.route("/api/debug/log")
