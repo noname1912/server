@@ -29,19 +29,17 @@ _YDL_STREAM_OPTS = {
 
 _SC_CLIENT_IDS = [
     "39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ",
-    "b45b1e1079f42ab666772d8a886b6634",
-    "a3e059563d7fd3372b49b37f00a00bcf",
 ]
 _sc_cid_idx = 0
 _sc_client_id = _SC_CLIENT_IDS[0]
 _last_scrape_time = 0
 _sc_cache = {}  # query: (timestamp, results)
 
-def _scrape_fresh_client_id() -> str:
+def _scrape_fresh_client_id(force: bool = False) -> str:
     """Tự động cào client_id mới nhất từ assets JS của soundcloud.com khi token cũ bị 401."""
     global _sc_client_id, _last_scrape_time, _SC_CLIENT_IDS
     now = time.time()
-    if now - _last_scrape_time < 30 and _sc_client_id:
+    if not force and now - _last_scrape_time < 30 and _sc_client_id:
         return _sc_client_id
     _last_scrape_time = now
     headers = {
@@ -49,14 +47,14 @@ def _scrape_fresh_client_id() -> str:
     }
     try:
         req = urllib.request.Request("https://soundcloud.com", headers=headers)
-        with urllib.request.urlopen(req, timeout=4) as res:
+        with urllib.request.urlopen(req, timeout=5) as res:
             html = res.read().decode("utf-8", errors="ignore")
         scripts = re.findall(r'<script[^>]+src="([^">]+)"', html)
         js_urls = [s for s in scripts if s.endswith(".js")]
         for url in reversed(js_urls):
             try:
                 req_js = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req_js, timeout=3) as js_res:
+                with urllib.request.urlopen(req_js, timeout=4) as js_res:
                     js_text = js_res.read().decode("utf-8", errors="ignore")
                 cids = re.findall(r'client_id[:=]["\']([a-zA-Z0-9]{32})["\']', js_text)
                 if not cids:
@@ -84,13 +82,14 @@ def _get_sc_client_id() -> str:
 
 def _rotate_sc_client_id():
     global _sc_client_id, _sc_cid_idx
-    new_cid = _scrape_fresh_client_id()
+    new_cid = _scrape_fresh_client_id(force=True)
     if new_cid and new_cid != _sc_client_id:
         _sc_client_id = new_cid
         return _sc_client_id
-    _sc_cid_idx = (_sc_cid_idx + 1) % len(_SC_CLIENT_IDS)
-    _sc_client_id = _SC_CLIENT_IDS[_sc_cid_idx]
-    print(f"[SoundCloud] Rotated to client_id: {_sc_client_id}")
+    if len(_SC_CLIENT_IDS) > 1:
+        _sc_cid_idx = (_sc_cid_idx + 1) % len(_SC_CLIENT_IDS)
+        _sc_client_id = _SC_CLIENT_IDS[_sc_cid_idx]
+    print(f"[SoundCloud] Active client_id: {_sc_client_id}")
     return _sc_client_id
 
 
@@ -318,17 +317,29 @@ class SoundCloudPlatform:
                 with urllib.request.urlopen(t_req, timeout=5) as t_res:
                     t_data = json.loads(t_res.read().decode("utf-8"))
                 trans = t_data.get("media", {}).get("transcodings", [])
-                progs = [x for x in trans if x.get("format", {}).get("protocol") == "progressive"]
-                target = progs[0] if progs else (trans[0] if trans else None)
-                if target and target.get("url"):
-                    m_url = target["url"] + f"?client_id={cid}"
-                    m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(m_req, timeout=5) as m_res:
-                        m_data = json.loads(m_res.read().decode("utf-8"))
-                        direct = m_data.get("url")
-                        if direct:
-                            print(f"[SoundCloud] Direct API v2 stream URL obtained: {direct[:60]}...")
-                            return direct
+                # Sắp xếp ưu tiên: 1. progressive (mp3), 2. hls audio/mp4 (fMP4 aac), 3. các protocol khác
+                def _trans_score(x):
+                    proto = (x.get("format", {}).get("protocol") or "").lower()
+                    mime = (x.get("format", {}).get("mime_type") or "").lower()
+                    if proto == "progressive": return 100
+                    if "mp4" in mime: return 80
+                    if "mpeg" in mime: return 20
+                    return 50
+                sorted_trans = sorted(trans, key=_trans_score, reverse=True)
+                for target in sorted_trans:
+                    if not target or not target.get("url"):
+                        continue
+                    try:
+                        m_url = target["url"] + f"?client_id={cid}"
+                        m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0"})
+                        with urllib.request.urlopen(m_req, timeout=4) as m_res:
+                            m_data = json.loads(m_res.read().decode("utf-8"))
+                            direct = m_data.get("url")
+                            if direct:
+                                print(f"[SoundCloud] Direct API v2 stream URL obtained: {direct[:60]}...")
+                                return direct
+                    except Exception:
+                        continue
             except Exception as ex_v2:
                 print(f"[SoundCloud] Direct API v2 stream failed ({ex_v2}), falling back to yt-dlp...")
 
@@ -342,7 +353,7 @@ class SoundCloudPlatform:
         else:
             url = f"https://soundcloud.com/{song_id}"
 
-        for attempt in range(3):
+        for attempt in range(2):
             try:
                 with yt_dlp.YoutubeDL(_YDL_STREAM_OPTS) as ydl:
                     info = ydl.extract_info(url, download=False)
@@ -350,22 +361,19 @@ class SoundCloudPlatform:
                         return None
                     # Ưu tiên url trực tiếp
                     direct = info.get("url")
-                    if direct and "manifest" not in direct:
+                    if direct:
                         return direct
-                    # Duyệt formats, bỏ qua HLS manifest
+                    # Duyệt formats (chấp nhận cả HLS manifest vì FFmpeg transcode mượt mà)
                     fmts = info.get("formats", [])
                     audio_fmts = [
                         f for f in fmts
-                        if f.get("url")
-                        and "manifest" not in f.get("url", "")
-                        and f.get("acodec", "none") != "none"
+                        if f.get("url") and f.get("acodec", "none") != "none"
                     ]
                     if audio_fmts:
                         audio_fmts.sort(key=lambda f: f.get("abr") or 0, reverse=True)
                         return audio_fmts[0]["url"]
-                    # Fallback
                     for f in reversed(fmts):
-                        if f.get("url") and "manifest" not in f.get("url", ""):
+                        if f.get("url"):
                             return f["url"]
             except Exception as ex:
                 msg = str(ex)

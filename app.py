@@ -578,7 +578,8 @@ def recommendations():
         else:
             # Tất cả nền tảng: Lấy đủ 10 bài YouTube siêu tốc (~0.2s) làm nòng cốt
             # và song song lấy thêm bài SoundCloud/Zing trong 0.8s tối đa để trộn đều
-            with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+            executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+            try:
                 f_yt = executor.submit(_fetch_plat_songs, "youtube", primary_q, limit)
                 f_sc = executor.submit(_fetch_plat_songs, "soundcloud", primary_q, 3)
                 f_zg = executor.submit(_fetch_plat_songs, "zing", primary_q, 3)
@@ -623,6 +624,8 @@ def recommendations():
                         if len(collected_songs) >= limit: break
                         s["rec_reason"] = f"Theo gu: {primary_q}"
                         collected_songs.append(s)
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         final_songs = collected_songs[:limit]
 
@@ -634,7 +637,7 @@ def recommendations():
             "songs": final_songs
         }
         _set_cache(cache_key, res_payload)
-        _prewarm_thumbs(final_songs, 32, sync_count=5)
+        threading.Thread(target=_prewarm_thumbs, args=(final_songs, 32, 5), daemon=True).start()
         return jsonify(res_payload)
     except Exception as e:
         print(f"[Recommendations] Error: {e}")
@@ -856,6 +859,8 @@ def stream_audio(platform: str, song_id: str):
         "ffmpeg",
         "-y",
         "-loglevel", "error",
+        "-rw_timeout", "8000000",
+        "-analyzeduration", "1000000",
     ]
     if not is_m3u8:
         cmd.extend([
@@ -1026,7 +1031,7 @@ def _download_and_cache_thumbnail(url: str, size: int = 32) -> bytes:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://soundcloud.com/",
             "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-        }, timeout=3.5, verify=False)
+        }, timeout=1.2, verify=False)
         if r.status_code == 200 and len(r.content) > 100:
             raw = r.content
     except Exception:
@@ -1147,7 +1152,8 @@ def thumbnails_batch():
                 pass
             return idx, None
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(missing_indices), 6)) as ex:
+        ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(missing_indices), 6))
+        try:
             futures = [ex.submit(_fetch_one, idx) for idx in missing_indices]
             done, not_done = concurrent.futures.wait(futures, timeout=1.0)
             for f in done:
@@ -1157,6 +1163,8 @@ def thumbnails_batch():
                         results[idx] = rgb
                 except Exception:
                     pass
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
 
     # 3. Gom dữ liệu: nếu ảnh nào chưa tải kịp thì dùng fallback tức thì (0.01ms)
     out = bytearray()
