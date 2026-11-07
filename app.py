@@ -810,9 +810,9 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
 
         cmd = [
             "ffmpeg",
+            "-nostdin",
             "-y",
             "-loglevel", "error",
-            "-rw_timeout", "15000000",
         ]
         # reconnect options chi hop le voi giao thuc HTTP truc tiep, khong ap dung cho HLS demuxer
         if is_m3u8:
@@ -840,7 +840,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
             str(tmp_mp3)
         ])
         try:
-            proc = subprocess.Popen(cmd)
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
             _active_transcodes[cache_key] = proc
             print(f"[Stream-Prewarm] Background transcode started for {cache_key}")
         except Exception as e:
@@ -1004,6 +1004,7 @@ def stream_audio(platform: str, song_id: str):
 
     cmd = [
         "ffmpeg",
+        "-nostdin",
         "-y",
         "-loglevel", "error",
     ]
@@ -1012,6 +1013,10 @@ def stream_audio(platform: str, song_id: str):
             "-reconnect", "1",
             "-reconnect_streamed", "1",
             "-reconnect_delay_max", "5",
+        ])
+    else:
+        cmd.extend([
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
         ])
     cmd.extend([
         "-headers", headers_str,
@@ -1039,7 +1044,7 @@ def stream_audio(platform: str, song_id: str):
 
         proc = None
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=32768)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, bufsize=32768)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             while True:
                 chunk = proc.stdout.read(8192)
@@ -2418,7 +2423,7 @@ def get_wallpaper_info():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "version": "2.7-stable"})
+    return jsonify({"status": "ok", "version": "2.8-nostdin"})
 
 
 @app.route("/api/cache/clear", methods=["GET", "POST"])
@@ -2452,7 +2457,7 @@ def debug_test_ffmpeg(song_id):
     is_m3u8 = (".m3u8" in url.lower()) or ("manifest" in url.lower()) or ("/hls" in url.lower())
     headers_str = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nReferer: https://soundcloud.com/\r\n"
     cmd = [
-        "ffmpeg", "-y",
+        "ffmpeg", "-nostdin", "-y",
         "-rw_timeout", "6000000",
     ]
     if is_m3u8:
@@ -2469,7 +2474,7 @@ def debug_test_ffmpeg(song_id):
         "pipe:1"
     ])
     try:
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
         chunk = p.stdout.read(4096)
         _, err = p.communicate(timeout=5)
         p.terminate()
