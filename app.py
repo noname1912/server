@@ -2333,6 +2333,67 @@ def debug_journal():
         return str(e), 500
 
 
+@app.route("/api/debug/ffmpeg")
+def debug_ffmpeg():
+    try:
+        out = subprocess.check_output(["ps", "aux"], timeout=3.0).decode("utf-8", errors="ignore")
+        lines = [l for l in out.splitlines() if "ffmpeg" in l.lower() or "python" in l.lower()]
+        return Response("\n".join(lines), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return str(e), 500
+
+
+@app.route("/api/debug/test_ffmpeg")
+def test_ffmpeg_endpoint():
+    song_id = request.args.get("id", "1559680705")
+    p = PLATFORMS["soundcloud"]
+    t0 = time.time()
+    audio_url = p.get_stream_url(song_id)
+    t_url = time.time() - t0
+
+    is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower()) or ("playlist" in audio_url.lower())
+    
+    # Test different flags
+    results = [f"URL resolved in {t_url:.3f}s: {audio_url[:80]}..."]
+
+    # Option A: with analyzeduration 0, probesize 32768
+    cmd_a = [
+        "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp,subfile,httpproxy",
+        "-probesize", "32768", "-analyzeduration", "0",
+        "-i", audio_url,
+        "-vn", "-acodec", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        "-f", "mp3", "-write_xing", "0", "pipe:1"
+    ]
+    t_start = time.time()
+    try:
+        proc = subprocess.Popen(cmd_a, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=65536)
+        chunk = proc.stdout.read(8192)
+        proc.terminate()
+        results.append(f"Option A (probesize=32k, analyzedur=0): got {len(chunk)} bytes in {time.time() - t_start:.3f}s")
+    except Exception as e:
+        results.append(f"Option A error: {e}")
+
+    # Option B: default probesize, no analyzeduration limit
+    cmd_b = [
+        "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp,subfile,httpproxy",
+        "-i", audio_url,
+        "-vn", "-acodec", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        "-f", "mp3", "-write_xing", "0", "pipe:1"
+    ]
+    t_start = time.time()
+    try:
+        proc = subprocess.Popen(cmd_b, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=65536)
+        chunk = proc.stdout.read(8192)
+        proc.terminate()
+        results.append(f"Option B (default ffmpeg flags): got {len(chunk)} bytes in {time.time() - t_start:.3f}s")
+    except Exception as e:
+        results.append(f"Option B error: {e}")
+
+    return Response("\n".join(results), mimetype="text/plain; charset=utf-8")
+
+
 # ─── Weather API (Open-Meteo Integration) ─────────────────────
 
 _weather_cache = {
