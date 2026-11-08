@@ -837,6 +837,8 @@ def stream_audio(platform: str, song_id: str):
         "-ac", "2",
         "-f", "mp3",
         "-write_xing", "0",
+        "-flush_packets", "1",
+        "-muxdelay", "0",
         "pipe:1"
     ])
 
