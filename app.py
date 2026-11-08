@@ -711,6 +711,21 @@ def recommendations():
         }
         _set_cache(cache_key, res_payload)
         _prewarm_thumbs(final_songs, 32, sync_count=5)
+
+        # Nạp trước stream URL và fMP4 init/seg0 cho top 3 bài đề xuất để khi người dùng bấm là có ngay lập tức (0ms)
+        def _prewarm_rec_streams(songs_list=final_songs[:3], rec_plat=platform):
+            for s in songs_list:
+                try:
+                    sid = str(s.get("id", "")).strip()
+                    plat = str(s.get("platform", rec_plat)).lower()
+                    if sid:
+                        u = _resolve_url_sync(plat, sid, timeout=6.0)
+                        if u:
+                            _prefetch_fmp4(u, plat)
+                except Exception:
+                    pass
+        threading.Thread(target=_prewarm_rec_streams, daemon=True).start()
+
         return jsonify(res_payload)
     except Exception as e:
         print(f"[Recommendations] Error: {e}")
