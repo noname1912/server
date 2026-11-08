@@ -902,15 +902,18 @@ def stream_audio(platform: str, song_id: str):
         cmd.extend(["-referer", ref])
     if is_m3u8:
         # Bắt buộc phải có hls,data,applehttp để giải mã HLS m3u8 playlist không bị lỗi
+        # probesize=32768 & analyzeduration=0 giúp FFmpeg bỏ qua phân tích tải trước 10 segments (giảm từ 45s xuống <0.3s)
         cmd.extend([
             "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp,subfile,httpproxy",
-            "-probesize", "2097152",
-            "-analyzeduration", "5000000",
+            "-probesize", "32768",
+            "-analyzeduration", "0",
+            "-fflags", "+nobuffer",
+            "-flags", "low_delay",
         ])
     else:
         cmd.extend([
-            "-probesize", "131072",
-            "-analyzeduration", "500000",
+            "-probesize", "32768",
+            "-analyzeduration", "0",
         ])
     cmd.extend([
         "-i", audio_url,
@@ -940,8 +943,8 @@ def stream_audio(platform: str, song_id: str):
             # bufsize=65536 để FFmpeg giải mã mượt mà không bị nghẽn buffer trên HLS segments
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, bufsize=65536)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
-            # Chunk đầu tiên 8192 bytes để Werkzeug gửi ngay HTTP 200 OK và nạp đầy buffer ESP32 ban đầu
-            first_chunk = proc.stdout.read(8192)
+            # Chunk đầu tiên 2048 bytes để Werkzeug gửi ngay HTTP 200 OK cho ESP32 Loa trong <100ms
+            first_chunk = proc.stdout.read(2048)
             if not first_chunk:
                 err = proc.stderr.read().decode(errors="ignore") if proc.stderr else ""
                 print(f"[Stream-Pipe] FFmpeg failed on start (exit code {proc.poll()}): {err}")
