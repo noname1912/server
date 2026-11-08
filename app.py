@@ -2523,28 +2523,24 @@ def debug_test_live():
     audio_url = p.get_stream_url(song_id)
     t_url = time.time() - t0
 
-    req = urllib.request.Request(audio_url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=5) as r:
-        m3u8 = r.read().decode("utf-8", errors="ignore")
-
-    m3u8_live = m3u8.replace("#EXT-X-PLAYLIST-TYPE:VOD", "")
-    tmp_m3u8 = "/tmp/test_live.m3u8"
-    with open(tmp_m3u8, "w", encoding="utf-8") as f:
-        f.write(m3u8_live)
-
+    # Test direct URL FFmpeg with communicate() and timeout 10s
     cmd = [
-        "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
-        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp",
+        "ffmpeg", "-nostdin", "-y", "-loglevel", "info",
+        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp,subfile,httpproxy",
         "-probesize", "32768", "-analyzeduration", "0",
-        "-i", tmp_m3u8,
+        "-i", audio_url,
         "-vn", "-acodec", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
         "-f", "mp3", "-write_xing", "0", "pipe:1"
     ]
     t_ff = time.time()
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=65536)
-    chunk = proc.stdout.read(2048)
-    proc.terminate()
-    return f"URL in {t_url:.3f}s. First 2048 bytes from FFmpeg in {time.time()-t_ff:.3f}s!"
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout_data, stderr_data = proc.communicate(timeout=10.0)
+        return Response(f"URL in {t_url:.3f}s. FFmpeg took {time.time()-t_ff:.3f}s, got {len(stdout_data)} bytes MP3.\nStderr:\n{stderr_data.decode(errors='ignore')[:1500]}", mimetype="text/plain")
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout_data, stderr_data = proc.communicate()
+        return Response(f"URL in {t_url:.3f}s. FFmpeg TIMED OUT in {time.time()-t_ff:.3f}s!\nStderr:\n{stderr_data.decode(errors='ignore')[:1500]}", mimetype="text/plain")
 
 
 @app.route("/api/debug/test_fmp4")
