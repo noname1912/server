@@ -1136,17 +1136,17 @@ def stream_audio(platform: str, song_id: str):
                                     proc.kill()
                                 except Exception: pass
 
-                    return Response(
-                        stream_with_context(generate_fmp4()),
-                        status=200,
-                        headers={
-                            "Content-Type": "audio/mpeg",
-                            "Cache-Control": "no-cache",
-                            "Accept-Ranges": "none",
-                            "Access-Control-Allow-Origin": "*",
-                        },
-                        direct_passthrough=True,
-                    )
+                return Response(
+                    stream_with_context(generate_fmp4()),
+                    status=200,
+                    headers={
+                        "Content-Type": "audio/mpeg",
+                        "Cache-Control": "no-cache",
+                        "Accept-Ranges": "none",
+                        "Access-Control-Allow-Origin": "*",
+                    },
+                    direct_passthrough=True,
+                )
         except Exception as ex_m3u8:
             print(f"[Stream-fMP4] Fallback to standard FFmpeg pipe: {ex_m3u8}")
 
