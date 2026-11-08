@@ -29,10 +29,6 @@ _YDL_STREAM_OPTS = {
 
 _SC_CLIENT_IDS = [
     "39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ",
-    "b45b1e1079f42ab666772d8a886b6634",
-    "a3e059563d7fd3372b49b37f00a00bcf",
-    "fDoItMDGz7Z5e55hYgH2z4N2FvY46452",
-    "2t9loNfh0ekOfkJulRADQI9LgahLpt3x",
 ]
 _sc_cid_idx = 0
 _sc_client_id = _SC_CLIENT_IDS[0]
@@ -43,7 +39,7 @@ def _scrape_fresh_client_id(force: bool = False) -> str:
     """Tự động cào client_id mới nhất từ assets JS của soundcloud.com khi token cũ bị 401."""
     global _sc_client_id, _last_scrape_time, _SC_CLIENT_IDS
     now = time.time()
-    if not force and now - _last_scrape_time < 30 and _sc_client_id:
+    if not force and now - _last_scrape_time < 120 and _sc_client_id:
         return _sc_client_id
     _last_scrape_time = now
     headers = {
@@ -51,14 +47,15 @@ def _scrape_fresh_client_id(force: bool = False) -> str:
     }
     try:
         req = urllib.request.Request("https://soundcloud.com", headers=headers)
-        with urllib.request.urlopen(req, timeout=5) as res:
+        with urllib.request.urlopen(req, timeout=3.5) as res:
             html = res.read().decode("utf-8", errors="ignore")
         scripts = re.findall(r'<script[^>]+src="([^">]+)"', html)
         js_urls = [s for s in scripts if s.endswith(".js")]
-        for url in reversed(js_urls):
+        # Chỉ quét tối đa 2 file JS cuối (file chứa client_id chính) để không bao giờ bị nghẽn thời gian
+        for url in list(reversed(js_urls))[:2]:
             try:
                 req_js = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req_js, timeout=4) as js_res:
+                with urllib.request.urlopen(req_js, timeout=2.5) as js_res:
                     js_text = js_res.read().decode("utf-8", errors="ignore")
                 cids = re.findall(r'client_id[:=]["\']([a-zA-Z0-9]{32})["\']', js_text)
                 if not cids:
@@ -81,19 +78,18 @@ def _scrape_fresh_client_id(force: bool = False) -> str:
 def _get_sc_client_id() -> str:
     global _sc_client_id
     if not _sc_client_id:
-        return _scrape_fresh_client_id()
+        return _SC_CLIENT_IDS[0]
     return _sc_client_id
 
 def _rotate_sc_client_id():
     global _sc_client_id, _sc_cid_idx
-    new_cid = _scrape_fresh_client_id(force=True)
-    if new_cid and new_cid != _sc_client_id:
-        _sc_client_id = new_cid
-        return _sc_client_id
     if len(_SC_CLIENT_IDS) > 1:
         _sc_cid_idx = (_sc_cid_idx + 1) % len(_SC_CLIENT_IDS)
         _sc_client_id = _SC_CLIENT_IDS[_sc_cid_idx]
-    print(f"[SoundCloud] Active client_id: {_sc_client_id}")
+    else:
+        # Cào ngầm trong background thread, không block request hiện tại
+        import threading
+        threading.Thread(target=_scrape_fresh_client_id, args=(True,), daemon=True).start()
     return _sc_client_id
 
 

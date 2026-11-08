@@ -1296,33 +1296,28 @@ def _auto_play_next(from_user: bool = False) -> bool:
     song_id  = str(next_song.get("id", "")).strip()
     if not song_id:
         return False
-    _player_state["seq"] = int(time.time() * 1000) % 2000000000
-    _player_state["state"] = "playing"
+
     if song_id.startswith("http"):
         import base64
         safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
     else:
         safe_id = song_id
 
-    # Xóa cache của bài tiếp theo để luôn lấy stream URL tươi mới
-    _del_stream_cache(f"{platform}:{song_id}")
-    _del_stream_cache(f"{platform}:{safe_id}")
+    # 1. Phân giải stream URL trước khi kích hoạt lệnh phát để Loa có stream tức thì (0ms)
+    cached_url = _get_stream_cache(f"{platform}:{song_id}") or _get_stream_cache(f"{platform}:{safe_id}")
+    if not cached_url:
+        p_obj = PLATFORMS.get(platform)
+        if p_obj and hasattr(p_obj, "get_stream_url"):
+            try:
+                cached_url = p_obj.get_stream_url(song_id)
+                if cached_url:
+                    _set_stream_cache(f"{platform}:{song_id}", cached_url)
+                    _set_stream_cache(f"{platform}:{safe_id}", cached_url)
+            except Exception as ex_u:
+                print(f"[PlayerHub] Auto-next get stream URL error: {ex_u}")
 
-    # Pre-warm stream URL của bài tiếp theo
-    def _prewarm_next(plat=platform, sid=song_id, sfid=safe_id):
-        try:
-            p_obj = PLATFORMS.get(plat)
-            if p_obj and hasattr(p_obj, "get_stream_url"):
-                fresh = p_obj.get_stream_url(sid)
-                if fresh:
-                    _set_stream_cache(f"{plat}:{sid}", fresh)
-                    _set_stream_cache(f"{plat}:{sfid}", fresh)
-                    print(f"[PlayerHub] Pre-warmed next URL for {plat}:{sid}")
-        except Exception as ex_pw:
-            print(f"[PlayerHub] Pre-warm next error: {ex_pw}")
-
-    threading.Thread(target=_prewarm_next, daemon=True).start()
-
+    _player_state["seq"] = int(time.time() * 1000) % 2000000000
+    _player_state["state"] = "playing"
     _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
     _player_state["song"] = next_song
     _player_state["elapsed"] = 0
@@ -1373,7 +1368,19 @@ def player_play():
         "duration": int(data.get("duration", 0)),
     }
 
-    # Cập nhật trạng thái phát ngay lập tức (0ms) để ESP32 Loa nhận lệnh không bị trễ 10-20s
+    # 1. Phân giải stream URL trước khi đổi seq để ESP32 Loa khi kết nối /api/stream là CÓ LUỒNG NGAY LẬP TỨC (< 0.1s)
+    cached_url = _get_stream_cache(f"{platform}:{song_id}") or _get_stream_cache(f"{platform}:{safe_id}")
+    if not cached_url:
+        p_obj = PLATFORMS.get(platform)
+        if p_obj and hasattr(p_obj, "get_stream_url"):
+            try:
+                cached_url = p_obj.get_stream_url(song_id)
+                if cached_url:
+                    _set_stream_cache(f"{platform}:{song_id}", cached_url)
+                    _set_stream_cache(f"{platform}:{safe_id}", cached_url)
+            except Exception as ex_u:
+                print(f"[PlayerHub] Get stream URL error: {ex_u}")
+
     with _player_lock:
         global _playlist, _playlist_idx
         for i, s in enumerate(_playlist):
@@ -1389,24 +1396,6 @@ def player_play():
         _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
         _player_state["song"] = song_info
         _player_state["elapsed"] = 0
-
-    # Kích hoạt phân giải stream & transcode ngầm song song (Background) không làm nghẽn phản hồi
-    def _bg_prewarm():
-        try:
-            fresh_url = _get_stream_cache(f"{platform}:{song_id}") or _get_stream_cache(f"{platform}:{safe_id}")
-            if not fresh_url:
-                p_obj = PLATFORMS.get(platform)
-                if p_obj and hasattr(p_obj, "get_stream_url"):
-                    fresh_url = p_obj.get_stream_url(song_id)
-                    if fresh_url:
-                        _set_stream_cache(f"{platform}:{song_id}", fresh_url)
-                        _set_stream_cache(f"{platform}:{safe_id}", fresh_url)
-            # Luồng phát live stream qua pipe sẽ tự động transcode và đệm SSD khi client bắt đầu kéo nhạc
-            pass
-        except Exception as ex_pw:
-            print(f"[PlayerHub] BG Prewarm error: {ex_pw}")
-
-    threading.Thread(target=_bg_prewarm, daemon=True).start()
 
     try:
         db.add_play_history(song_info)
