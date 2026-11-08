@@ -2504,6 +2504,17 @@ def debug_log():
         return str(e), 500
 
 
+@app.route("/api/system/update", methods=["GET", "POST"])
+def system_update():
+    try:
+        git_dir = Path(__file__).resolve().parent
+        out = subprocess.check_output(["git", "pull", "origin", "main"], cwd=str(git_dir), timeout=15.0).decode("utf-8", errors="ignore")
+        subprocess.Popen(["bash", "-c", "sleep 1 && systemctl restart esp32-player.service"])
+        return jsonify({"status": "ok", "git": out.strip(), "message": "Server da cap nhat va dang khoi dong lai trong 1 giay..."})
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+
 @app.route("/api/debug/journal")
 def debug_journal():
     try:
