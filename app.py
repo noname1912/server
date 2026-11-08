@@ -485,22 +485,30 @@ def trending():
 @app.route("/api/recommendations")
 def recommendations():
     """
-    GET /api/recommendations?platform=<all|youtube|zing|soundcloud>&limit=10
-    Phân tích lịch sử nghe nhạc, bài hát yêu thích và tìm kiếm để đề xuất 10 bài hát phù hợp phong cách.
+    GET /api/recommendations?platform=<youtube|zing|soundcloud>&limit=10
+    Đề xuất 10 bài hát CHỈ THUỘC NỀN TẢNG ĐƯỢC CHỌN (Không bao giờ trộn lẫn các nền tảng khác).
     """
-    platform = request.args.get("platform", "all").lower()
+    platform = request.args.get("platform", "soundcloud").lower()
+    if platform not in PLATFORMS:
+        platform = "soundcloud"
     limit = int(request.args.get("limit", 10))
 
     cache_key = f"rec:{platform}:{limit}"
-    cached = _get_cache(cache_key, 120)
+    cached = _get_cache(cache_key, 60)
     if cached is not None:
         return jsonify(cached)
 
     try:
         from collections import Counter
-        history = db.get_play_history(30)
+        history = db.get_play_history(40)
         favorites = db.get_favorites()
-        searches = db.get_recent_searches(10)
+        searches = db.get_recent_searches(15)
+
+        # Lọc theo nền tảng được chọn để nhận diện gu chuẩn xác nhất
+        plat_history = [s for s in history if s.get("platform") == platform]
+        plat_favs    = [s for s in favorites if s.get("platform") == platform]
+        src_history  = plat_history if len(plat_history) >= 2 else history
+        src_favs     = plat_favs if len(plat_favs) >= 1 else favorites
 
         GENRE_KEYWORDS = [
             "remix", "vinahouse", "lofi", "chill", "acoustic", "ballad",
@@ -511,7 +519,7 @@ def recommendations():
         artist_counts = Counter()
         genre_counts = Counter()
 
-        for s in history:
+        for s in src_history:
             a = (s.get("artist") or "").strip()
             if a and a.lower() not in ("unknown", "nhieu ca si", "nhiều ca sĩ", "various artists", "various"):
                 artist_counts[a] += 1
@@ -520,7 +528,7 @@ def recommendations():
                 if g in t:
                     genre_counts[g] += 1
 
-        for s in favorites:
+        for s in src_favs:
             a = (s.get("artist") or "").strip()
             if a and a.lower() not in ("unknown", "nhieu ca si", "nhiều ca sĩ", "various artists", "various"):
                 artist_counts[a] += 2
@@ -569,155 +577,88 @@ def recommendations():
         else:
             search_queries = ["Remix TikTok Hot", "Chill Lofi Viet", "Top V-Pop"]
 
-        if platform in PLATFORMS:
-            target_plats = [platform]
-        else:
-            target_plats = ["youtube", "zing", "soundcloud"]
-
         collected_songs = []
         seen_ids = set()
         seen_titles = set()
 
-        # Tối ưu siêu tốc: Thực hiện 1 truy vấn duy nhất chuẩn xác (~0.25s) thay vì lặp tuần tự nhiều lần
         primary_q = search_queries[0]
+        sec_q = search_queries[1] if len(search_queries) > 1 else (top_genres[0] if top_genres else "Hot V-Pop")
+
         import concurrent.futures
 
-        def _fetch_plat_songs(p, q, lim):
-            if p not in PLATFORMS: return []
+        def _fetch_songs(q, lim):
             try:
-                return PLATFORMS[p].search(q, limit=lim)
-            except Exception as e:
+                res = PLATFORMS[platform].search(q, limit=lim)
+                for s in res: s["platform"] = platform
+                return res
+            except Exception:
                 return []
 
-        if platform in PLATFORMS:
-            # Lấy đa dạng nguồn song song trong 3.0s:
-            # 1. Bài theo primary_q (gu nghệ sĩ/thể loại)
-            # 2. Bài theo secondary_q (thể loại hot khác hoặc nghệ sĩ 2 hoặc "Top Hot TikTok")
-            # 3. Bài theo trending thịnh hành
-            sec_q = search_queries[1] if len(search_queries) > 1 else (top_genres[0] if top_genres else "Hot V-Pop")
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        def _fetch_trend(lim):
             try:
-                f_pri = executor.submit(_fetch_plat_songs, platform, primary_q, 8)
-                f_sec = executor.submit(_fetch_plat_songs, platform, sec_q, 8)
-                f_trd = executor.submit(lambda: PLATFORMS[platform].get_trending(limit=8))
+                res = PLATFORMS[platform].get_trending(limit=lim)
+                for s in res: s["platform"] = platform
+                return res
+            except Exception:
+                return []
 
-                pri_songs = []
-                sec_songs = []
-                trd_songs = []
-                try: pri_songs = f_pri.result(timeout=3.0) or []
-                except Exception: pass
-                try: sec_songs = f_sec.result(timeout=3.0) or []
-                except Exception: pass
-                try: trd_songs = f_trd.result(timeout=3.0) or []
-                except Exception: pass
+        # Chỉ truy vấn 100% đúng nền tảng đã chọn
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        try:
+            f_pri = executor.submit(_fetch_songs, primary_q, 8)
+            f_sec = executor.submit(_fetch_songs, sec_q, 8)
+            f_trd = executor.submit(_fetch_trend, 8)
 
-                # Đa dạng hóa: Giới hạn tối đa 2 bài trên 1 nghệ sĩ để danh sách không bị trùng lặp
-                artist_tally = Counter()
-                def _add_song(s, reason):
-                    sid = str(s.get("id"))
-                    stitle = (s.get("title") or "").strip().lower()
-                    sart = (s.get("artist") or "").strip().lower()
-                    if not sid or sid in seen_ids: return False
-                    if stitle in seen_titles: return False
-                    if sart and sart not in ("unknown", "") and artist_tally[sart] >= 2:
-                        return False
-                    seen_ids.add(sid)
-                    seen_titles.add(stitle)
-                    if sart: artist_tally[sart] += 1
-                    s["rec_reason"] = reason
-                    collected_songs.append(s)
-                    return True
+            pri_songs = []
+            sec_songs = []
+            trd_songs = []
+            try: pri_songs = f_pri.result(timeout=2.5) or []
+            except Exception: pass
+            try: sec_songs = f_sec.result(timeout=2.5) or []
+            except Exception: pass
+            try: trd_songs = f_trd.result(timeout=2.5) or []
+            except Exception: pass
 
-                # Trộn xen kẽ: 1 gu cá nhân, 1 trending, 1 khám phá mới
-                max_len = max(len(pri_songs), len(sec_songs), len(trd_songs))
-                for idx in range(max_len):
-                    if idx < len(pri_songs): _add_song(pri_songs[idx], f"Theo gu: {primary_q}")
+            artist_tally = Counter()
+            def _add_song(s, reason):
+                sid = str(s.get("id"))
+                stitle = (s.get("title") or "").strip().lower()
+                sart = (s.get("artist") or "").strip().lower()
+                if not sid or sid in seen_ids: return False
+                if stitle in seen_titles: return False
+                if sart and sart not in ("unknown", "") and artist_tally[sart] >= 2:
+                    return False
+                seen_ids.add(sid)
+                seen_titles.add(stitle)
+                if sart: artist_tally[sart] += 1
+                s["platform"] = platform
+                s["rec_reason"] = reason
+                collected_songs.append(s)
+                return True
+
+            max_len = max(len(pri_songs), len(sec_songs), len(trd_songs))
+            for idx in range(max_len):
+                if idx < len(pri_songs): _add_song(pri_songs[idx], f"Theo gu: {primary_q}")
+                if len(collected_songs) >= limit: break
+                if idx < len(trd_songs): _add_song(trd_songs[idx], "Thịnh hành BXH")
+                if len(collected_songs) >= limit: break
+                if idx < len(sec_songs): _add_song(sec_songs[idx], f"Gợi ý: {sec_q}")
+                if len(collected_songs) >= limit: break
+
+            for pool, reas in [(pri_songs, "Gợi ý"), (sec_songs, "Khám phá"), (trd_songs, "Xu hướng")]:
+                for s in pool:
                     if len(collected_songs) >= limit: break
-                    if idx < len(trd_songs): _add_song(trd_songs[idx], "Thịnh hành BXH")
-                    if len(collected_songs) >= limit: break
-                    if idx < len(sec_songs): _add_song(sec_songs[idx], f"Gợi ý: {sec_q}")
-                    if len(collected_songs) >= limit: break
+                    _add_song(s, reas)
 
-                # Nếu vẫn chưa đủ limit, nạp thêm từ các bài còn lại
-                for pool, reas in [(pri_songs, "Gợi ý"), (sec_songs, "Khám phá"), (trd_songs, "Xu hướng")]:
-                    for s in pool:
+            if len(collected_songs) < limit:
+                try:
+                    for s in _fetch_trend(15):
                         if len(collected_songs) >= limit: break
-                        sid = str(s.get("id"))
-                        stitle = (s.get("title") or "").strip().lower()
-                        if sid not in seen_ids and stitle not in seen_titles:
-                            seen_ids.add(sid)
-                            seen_titles.add(stitle)
-                            s["rec_reason"] = reas
-                            collected_songs.append(s)
-
-                # Fallback an toàn: nếu vẫn chưa đủ 10 bài, lấy thêm từ trending chung
-                if len(collected_songs) < limit:
-                    try:
-                        extra_trending = PLATFORMS[platform].get_trending(limit=15)
-                        for s in extra_trending:
-                            if len(collected_songs) >= limit: break
-                            sid = str(s.get("id"))
-                            stitle = (s.get("title") or "").strip().lower()
-                            if sid not in seen_ids and stitle not in seen_titles:
-                                seen_ids.add(sid)
-                                seen_titles.add(stitle)
-                                s["rec_reason"] = "Thịnh hành"
-                                collected_songs.append(s)
-                    except Exception:
-                        pass
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
-        else:
-            # Tất cả nền tảng: Lấy đủ 10 bài YouTube siêu tốc (~0.2s) làm nòng cốt
-            # và song song lấy thêm bài SoundCloud/Zing trong 0.8s tối đa để trộn đều
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
-            try:
-                f_yt = executor.submit(_fetch_plat_songs, "youtube", primary_q, limit)
-                f_sc = executor.submit(_fetch_plat_songs, "soundcloud", primary_q, 3)
-                f_zg = executor.submit(_fetch_plat_songs, "zing", primary_q, 3)
-                
-                yt_songs = []
-                sc_songs = []
-                zg_songs = []
-                try:
-                    yt_songs = f_yt.result(timeout=1.5)
+                        _add_song(s, "Thịnh hành")
                 except Exception:
                     pass
-                try:
-                    sc_songs = f_sc.result(timeout=0.8)
-                except Exception:
-                    pass
-                try:
-                    zg_songs = f_zg.result(timeout=0.8)
-                except Exception:
-                    pass
-
-                # Trộn xen kẽ để người dùng thấy đa dạng nền tảng ngay lập tức
-                interleaved = []
-                i_yt, i_sc, i_zg = 0, 0, 0
-                while len(interleaved) < limit and (i_yt < len(yt_songs) or i_sc < len(sc_songs) or i_zg < len(zg_songs)):
-                    if i_yt < len(yt_songs):
-                        interleaved.append(yt_songs[i_yt])
-                        i_yt += 1
-                    if len(interleaved) < limit and i_sc < len(sc_songs):
-                        interleaved.append(sc_songs[i_sc])
-                        i_sc += 1
-                    if len(interleaved) < limit and i_zg < len(zg_songs):
-                        interleaved.append(zg_songs[i_zg])
-                        i_zg += 1
-
-                for s in interleaved:
-                    s["rec_reason"] = f"Theo gu: {primary_q}"
-                    collected_songs.append(s)
-
-                # Nếu vẫn chưa đủ, dùng nốt yt_songs
-                if len(collected_songs) < limit:
-                    for s in yt_songs[i_yt:]:
-                        if len(collected_songs) >= limit: break
-                        s["rec_reason"] = f"Theo gu: {primary_q}"
-                        collected_songs.append(s)
-            finally:
-                executor.shutdown(wait=False, cancel_futures=True)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
         final_songs = collected_songs[:limit]
 
@@ -972,6 +913,8 @@ def stream_audio(platform: str, song_id: str):
         "-nostdin",
         "-y",
         "-loglevel", "error",
+        "-probesize", "32768",
+        "-analyzeduration", "200000",
     ]
     if not is_m3u8:
         cmd.extend([
@@ -1012,7 +955,7 @@ def stream_audio(platform: str, song_id: str):
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, bufsize=32768)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             while True:
-                chunk = proc.stdout.read(8192)
+                chunk = proc.stdout.read(4096)
                 if not chunk:
                     break
                 if f_cache:
@@ -1043,8 +986,6 @@ def stream_audio(platform: str, song_id: str):
                 except Exception: pass
             if proc and proc.poll() is None:
                 try: proc.kill()
-                except Exception: pass
-                except Exception: pass
                 except Exception: pass
 
     return Response(
@@ -2388,7 +2329,7 @@ def get_wallpaper_info():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "version": "3.0-instant"})
+    return jsonify({"status": "ok", "version": "3.1-instant-pureplat"})
 
 
 @app.route("/api/cache/clear", methods=["GET", "POST"])
