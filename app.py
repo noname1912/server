@@ -896,8 +896,6 @@ def stream_audio(platform: str, song_id: str):
         "-y",
         "-threads", "2",
         "-loglevel", "error",
-        "-probesize", "65536",
-        "-analyzeduration", "200000",
         "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     ]
     if ref:
@@ -905,7 +903,14 @@ def stream_audio(platform: str, song_id: str):
     if is_m3u8:
         # Bắt buộc phải có hls,data,applehttp để giải mã HLS m3u8 playlist không bị lỗi
         cmd.extend([
-            "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp",
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp,subfile,httpproxy",
+            "-probesize", "2097152",
+            "-analyzeduration", "5000000",
+        ])
+    else:
+        cmd.extend([
+            "-probesize", "131072",
+            "-analyzeduration", "500000",
         ])
     cmd.extend([
         "-i", audio_url,
@@ -937,11 +942,15 @@ def stream_audio(platform: str, song_id: str):
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             # Chunk đầu tiên 8192 bytes để Werkzeug gửi ngay HTTP 200 OK và nạp đầy buffer ESP32 ban đầu
             first_chunk = proc.stdout.read(8192)
-            if first_chunk:
-                if f_cache:
-                    try: f_cache.write(first_chunk)
-                    except Exception: pass
-                yield first_chunk
+            if not first_chunk:
+                err = proc.stderr.read().decode(errors="ignore") if proc.stderr else ""
+                print(f"[Stream-Pipe] FFmpeg failed on start (exit code {proc.poll()}): {err}")
+                return
+
+            if f_cache:
+                try: f_cache.write(first_chunk)
+                except Exception: pass
+            yield first_chunk
 
             while True:
                 chunk = proc.stdout.read(8192)
@@ -2311,6 +2320,15 @@ def debug_log():
         with open("server.log", "r", encoding="utf-8", errors="ignore") as f:
             lines = f.readlines()
         return Response("".join(lines[-100:]), mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return str(e), 500
+
+
+@app.route("/api/debug/journal")
+def debug_journal():
+    try:
+        out = subprocess.check_output(["journalctl", "-u", "esp32-player.service", "-n", "80", "--no-pager"], timeout=3.0)
+        return Response(out, mimetype="text/plain; charset=utf-8")
     except Exception as e:
         return str(e), 500
 
