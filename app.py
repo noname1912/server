@@ -710,7 +710,7 @@ def recommendations():
             "songs": final_songs
         }
         _set_cache(cache_key, res_payload)
-        _prewarm_thumbs(final_songs, 32, sync_count=5)
+        _prewarm_thumbs(final_songs, 32, sync_count=0)
 
         # Nạp trước stream URL và fMP4 init/seg0 cho top 3 bài đề xuất để khi người dùng bấm là có ngay lập tức (0ms)
         def _prewarm_rec_streams(songs_list=final_songs[:3], rec_plat=platform):
