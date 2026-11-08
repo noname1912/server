@@ -309,25 +309,31 @@ class SoundCloudPlatform:
                 numeric_id = m.group(1)
 
         if numeric_id:
-            try:
-                t_url = f"https://api-v2.soundcloud.com/tracks/{numeric_id}?client_id={cid}"
-                t_req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(t_req, timeout=5) as t_res:
-                    t_data = json.loads(t_res.read().decode("utf-8"))
-                trans = t_data.get("media", {}).get("transcodings", [])
-                progs = [x for x in trans if x.get("format", {}).get("protocol") == "progressive"]
-                target = progs[0] if progs else (trans[0] if trans else None)
-                if target and target.get("url"):
-                    m_url = target["url"] + f"?client_id={cid}"
-                    m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(m_req, timeout=5) as m_res:
-                        m_data = json.loads(m_res.read().decode("utf-8"))
-                        direct = m_data.get("url")
-                        if direct:
-                            print(f"[SoundCloud] Direct API v2 stream URL obtained: {direct[:60]}...")
-                            return direct
-            except Exception as ex_v2:
-                print(f"[SoundCloud] Direct API v2 stream failed ({ex_v2}), falling back to yt-dlp...")
+            for sc_attempt in range(2):
+                try:
+                    cid = _get_sc_client_id()
+                    t_url = f"https://api-v2.soundcloud.com/tracks/{numeric_id}?client_id={cid}"
+                    t_req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                    with urllib.request.urlopen(t_req, timeout=3.5) as t_res:
+                        t_data = json.loads(t_res.read().decode("utf-8"))
+                    trans = t_data.get("media", {}).get("transcodings", [])
+                    progs = [x for x in trans if x.get("format", {}).get("protocol") == "progressive"]
+                    target = progs[0] if progs else (trans[0] if trans else None)
+                    if target and target.get("url"):
+                        m_url = target["url"] + f"?client_id={cid}"
+                        m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                        with urllib.request.urlopen(m_req, timeout=3.5) as m_res:
+                            m_data = json.loads(m_res.read().decode("utf-8"))
+                            direct = m_data.get("url")
+                            if direct:
+                                print(f"[SoundCloud] Direct API v2 stream URL obtained: {direct[:60]}...")
+                                return direct
+                except Exception as ex_v2:
+                    if sc_attempt == 0:
+                        print(f"[SoundCloud] Direct API v2 failed with cid={cid} ({ex_v2}), scraping fresh client_id...")
+                        _scrape_fresh_client_id(force=True)
+                    else:
+                        print(f"[SoundCloud] Direct API v2 stream retry failed ({ex_v2}), falling back to yt-dlp...")
 
         # 2. Fallback sang yt-dlp nếu không lấy được bằng API v2
         if raw_url:

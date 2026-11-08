@@ -7,12 +7,21 @@ import os
 import time
 import json
 import struct
+import socket
 import threading
 import urllib.request
 from io import BytesIO
 from pathlib import Path
 import subprocess
 from urllib.parse import unquote
+
+# Ép hệ thống ưu tiên phân giải IPv4 để triệt tiêu hoàn toàn độ trễ 20s timeout IPv6 trên Linux VPS
+_orig_getaddrinfo = socket.getaddrinfo
+def _prefer_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if family == 0 or family == socket.AF_UNSPEC:
+        family = socket.AF_INET
+    return _orig_getaddrinfo(host, port, family, type, proto, flags)
+socket.getaddrinfo = _prefer_ipv4_getaddrinfo
 
 from flask import (Flask, jsonify, request, render_template,
                    Response, stream_with_context, abort, send_file)
@@ -1303,23 +1312,6 @@ def player_play():
         "duration": int(data.get("duration", 0)),
     }
 
-    # 1. Phân giải stream URL TRƯỚC KHI cập nhật seq và stream_url
-    # Để khi ESP32 Loa nhận lệnh phát là URL đã có sẵn trong _stream_cache (0ms), Loa không bị timeout!
-    cached_url = None
-    with _cache_lock:
-        cached_url = _stream_cache.get(f"{platform}:{song_id}") or _stream_cache.get(f"{platform}:{safe_id}")
-    if not cached_url:
-        p_obj = PLATFORMS.get(platform)
-        if p_obj and hasattr(p_obj, "get_stream_url"):
-            try:
-                cached_url = p_obj.get_stream_url(song_id)
-                if cached_url:
-                    with _cache_lock:
-                        _stream_cache[f"{platform}:{song_id}"] = cached_url
-                        _stream_cache[f"{platform}:{safe_id}"] = cached_url
-            except Exception as ex_u:
-                print(f"[PlayerHub] Get stream URL error: {ex_u}")
-
     with _player_lock:
         global _playlist, _playlist_idx
         for i, s in enumerate(_playlist):
@@ -1342,6 +1334,24 @@ def player_play():
         print(f"[PlayerHub] Add history error: {ex_h}")
 
     print(f"[PlayerHub] PLAY #{_player_state['seq']}: {song_info.get('title')} ({platform})")
+
+    # Kích hoạt phân giải URL ngầm ngay lập tức (KHÔNG BLOCK MÀN HÌNH VÀ LOA)
+    def _bg_resolve():
+        with _cache_lock:
+            cached = _stream_cache.get(f"{platform}:{song_id}") or _stream_cache.get(f"{platform}:{safe_id}")
+        if not cached:
+            p = PLATFORMS.get(platform)
+            if p and hasattr(p, "get_stream_url"):
+                try:
+                    u = p.get_stream_url(song_id)
+                    if u:
+                        with _cache_lock:
+                            _stream_cache[f"{platform}:{song_id}"] = u
+                            _stream_cache[f"{platform}:{safe_id}"] = u
+                except Exception as ex:
+                    print(f"[PlayerHub-BG] Resolve URL error: {ex}")
+    threading.Thread(target=_bg_resolve, daemon=True).start()
+
     return jsonify({"status": "ok", "seq": _player_state["seq"], "song": song_info})
 
 
