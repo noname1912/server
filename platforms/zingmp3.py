@@ -160,8 +160,18 @@ class ZingMP3Platform:
         """
         if song_id.startswith("http"):
             url = song_id
-        else:
+        elif len(song_id) == 11 and not song_id.startswith("ZW"):
             url = f"https://www.youtube.com/watch?v={song_id}"
+        else:
+            # Không phải YouTube ID chuẩn (ví dụ Zing ID cũ hoặc tiêu đề) -> tìm kiếm bài tương ứng
+            try:
+                search_items = self.search(song_id, limit=1)
+                if search_items and search_items[0].get("id"):
+                    url = f"https://www.youtube.com/watch?v={search_items[0]['id']}"
+                else:
+                    return None
+            except Exception:
+                return None
 
         try:
             with yt_dlp.YoutubeDL(_YDL_STREAM_OPTS) as ydl:

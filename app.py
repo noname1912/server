@@ -930,10 +930,10 @@ def stream_audio(platform: str, song_id: str):
 
     def generate_audio_stream():
         # DÒNG ĐẦU TIÊN CỰC KỲ QUAN TRỌNG:
-        # Nhả ngay 4 frame MP3 sync silence frames (128kbps, 44.1kHz, Stereo silence ~0.1s)
-        # Giúp Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa trong <1ms cùng lúc với connecttohost!
+        # Nhả ngay 24 frame MP3 sync silence frames (10KB ~0.62s silence)
+        # Giúp Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa (<1ms) và nạp đầy ring buffer ESP32 (chống dropouts/slow stream)!
         mp3_silence_frame = bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413) # 417 bytes / frame (~26.1ms)
-        yield mp3_silence_frame * 4
+        yield mp3_silence_frame * 24
 
         # Nếu trong lúc đó file cache hoàn chỉnh vừa được tạo bởi luồng khác:
         if final_mp3.exists() and final_mp3.stat().st_size > 20000:
@@ -949,7 +949,7 @@ def stream_audio(platform: str, song_id: str):
                 pass
 
         # Lấy stream URL gốc (đồng bộ hóa chống gọi trùng lặp giữa background worker và stream request)
-        # Trong khi chờ resolve URL (nếu chưa có trong cache), nhả liên tục silence frames mỗi 45ms để giữ ấm buffer ESP32 và socket
+        # Trong khi chờ resolve URL (nếu chưa có trong cache), nhả liên tục silence frames để giữ ấm buffer ESP32 và socket
         audio_url = None
         start_wait = time.time()
         while time.time() - start_wait < 8.0:
@@ -957,14 +957,17 @@ def stream_audio(platform: str, song_id: str):
                 if cache_key in _stream_cache:
                     audio_url = _stream_cache[cache_key]
                     break
-            audio_url = _resolve_url_sync(platform, song_id, timeout=0.08)
+            audio_url = _resolve_url_sync(platform, song_id, timeout=0.1)
             if audio_url:
                 break
-            yield mp3_silence_frame * 2
-            time.sleep(0.045)
+            yield mp3_silence_frame * 4
 
         if not audio_url:
-            print(f"[Stream] Cannot get stream URL for {cache_key}")
+            print(f"[Stream] Cannot get stream URL for {cache_key} -> trigger auto-next")
+            try:
+                _auto_play_next()
+            except Exception:
+                pass
             return
 
         is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower()) or ("playlist" in audio_url.lower())
