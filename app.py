@@ -9,6 +9,13 @@ import time
 import json
 import struct
 import socket
+import socketserver
+socketserver.TCPServer.request_queue_size = 512
+try:
+    from werkzeug.serving import BaseWSGIServer
+    BaseWSGIServer.request_queue_size = 512
+except Exception:
+    pass
 import threading
 import urllib.request
 import urllib.parse
