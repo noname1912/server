@@ -789,6 +789,10 @@ def stream_audio(platform: str, song_id: str):
 
         print(f"[Stream-Direct] Fast direct MP3 stream for {cache_key}")
         def generate_direct():
+            # Gửi ngay 4 frame MP3 silence (~0.1s) để Werkzeug nhả ngay HTTP 200 OK cho ESP32 Loa trong <1ms!
+            mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
+            yield mp3_burst
+
             f_cache = None
             try:
                 if tmp_mp3.exists():
@@ -884,6 +888,10 @@ def stream_audio(platform: str, song_id: str):
     ])
 
     def generate_pipe():
+        # Gửi ngay 4 frame MP3 silence (~0.1s) để Werkzeug nhả ngay HTTP 200 OK cho ESP32 Loa trong <1ms!
+        mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
+        yield mp3_burst
+
         f_cache = None
         try:
             if tmp_mp3.exists():
