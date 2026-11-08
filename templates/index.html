@@ -918,21 +918,45 @@
       display: flex;
       flex-direction: column;
       gap: 4px;
+      overflow: hidden;
+    }
+    .player-marquee-box {
+      overflow: hidden;
+      white-space: nowrap;
+      position: relative;
+      max-width: 220px;
+    }
+    @media (min-width: 1024px) {
+      .player-marquee-box {
+        max-width: 340px;
+      }
     }
     .player-title {
       font-size: 0.95rem;
       font-weight: 700;
       white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
       color: var(--sc-text-main);
+      display: inline-block;
+      vertical-align: middle;
     }
     .player-artist {
       font-size: 0.8rem;
       color: var(--sc-text-muted);
       white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
+      display: inline-block;
+      vertical-align: middle;
+    }
+    .marquee-anim {
+      display: inline-block !important;
+      animation: marqueeBounce var(--marquee-duration, 8s) ease-in-out infinite alternate !important;
+    }
+    @keyframes marqueeBounce {
+      0%, 20% {
+        transform: translateX(0);
+      }
+      80%, 100% {
+        transform: translateX(var(--marquee-overflow, -50px));
+      }
     }
 
     /* Player Center: Waveform Scrubber & Controls */
@@ -1913,8 +1937,12 @@
     <div class="player-left">
       <img src="https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=120&auto=format&fit=crop" onerror="this.onerror=null; this.src='https://images.unsplash.com/photo-1511671782779-c97d3d27a1d4?w=120';" id="playerThumb" class="player-art" alt="Track Cover" />
       <div class="player-meta">
-        <div class="player-title" id="playerTitle">Chưa chọn bài hát</div>
-        <div class="player-artist" id="playerArtist">SoundCloud ESP32 Player</div>
+        <div class="player-marquee-box">
+          <div class="player-title" id="playerTitle">Chưa chọn bài hát</div>
+        </div>
+        <div class="player-marquee-box">
+          <div class="player-artist" id="playerArtist">SoundCloud ESP32 Player</div>
+        </div>
       </div>
       <i class="fa-regular fa-heart sc-action-icon" id="playerFavBtn" onclick="toggleCurrentFavorite()" title="Yêu thích"></i>
     </div>
@@ -2063,6 +2091,34 @@
         waveCtx.fill();
       }
     }
+
+    // ─── Chu Chay (Marquee) Helper khi ten bai / tac gia dai ───
+    function checkAndApplyMarquee(el) {
+      if (!el) return;
+      el.style.animation = 'none';
+      el.style.transform = 'none';
+      el.classList.remove('marquee-anim');
+
+      const parent = el.parentElement;
+      if (!parent) return;
+
+      setTimeout(() => {
+        const overflow = el.scrollWidth - parent.clientWidth;
+        if (overflow > 4) {
+          el.style.setProperty('--marquee-overflow', `-${overflow + 16}px`);
+          const dur = Math.max(6, Math.min(24, Math.round(overflow / 22)));
+          el.style.setProperty('--marquee-duration', `${dur}s`);
+          el.classList.add('marquee-anim');
+        }
+      }, 60);
+    }
+
+    window.addEventListener('resize', () => {
+      checkAndApplyMarquee(document.getElementById('playerTitle'));
+      checkAndApplyMarquee(document.getElementById('playerArtist'));
+      const activeTrackName = document.querySelector('.sc-track-item.playing .track-name');
+      if (activeTrackName) checkAndApplyMarquee(activeTrackName);
+    });
 
     // ─── Format Time (mm:ss) ──────────────────────────────────
     function formatTime(seconds) {
@@ -2925,8 +2981,15 @@
       currentSong = song;
       isPlaying = isPlayingState;
 
-      document.getElementById('playerTitle').textContent = song.title || 'Đang phát nhạc';
-      document.getElementById('playerArtist').textContent = song.artist || 'Nghệ sĩ';
+      const pTitle = document.getElementById('playerTitle');
+      const pArtist = document.getElementById('playerArtist');
+      pTitle.textContent = song.title || 'Đang phát nhạc';
+      pTitle.title = song.title || '';
+      pArtist.textContent = song.artist || 'Nghệ sĩ';
+      pArtist.title = song.artist || '';
+      checkAndApplyMarquee(pTitle);
+      checkAndApplyMarquee(pArtist);
+
       if (song.thumbnail) {
         document.getElementById('playerThumb').src = song.thumbnail;
       }
@@ -2945,7 +3008,23 @@
       }
 
       // Highlight playing in lists
-      document.querySelectorAll('.sc-track-item').forEach(el => el.classList.remove('playing'));
+      document.querySelectorAll('.sc-track-item').forEach(el => {
+        el.classList.remove('playing');
+        const tn = el.querySelector('.track-name');
+        if (tn) {
+          tn.classList.remove('marquee-anim');
+          tn.style.animation = 'none';
+          tn.style.transform = 'none';
+        }
+      });
+      if (song && song.id) {
+        const playingEl = document.querySelector(`.sc-track-item[data-id="${song.id}"]`);
+        if (playingEl) {
+          playingEl.classList.add('playing');
+          const tn = playingEl.querySelector('.track-name');
+          if (tn) checkAndApplyMarquee(tn);
+        }
+      }
     }
 
     // ─── Realtime Status Polling (Sync with Server & ESP32) ───
