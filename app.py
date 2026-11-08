@@ -2346,6 +2346,22 @@ def ai_voice_command():
 WALLPAPER_BIN = Path(__file__).parent / "static" / "clock_wallpaper.bin"
 WALLPAPER_GIF = Path(__file__).parent / "static" / "clock_wallpaper.gif"
 WALLPAPER_JPG = Path(__file__).parent / "static" / "clock_wallpaper.jpg"
+WALLPAPER_CFG = Path(__file__).parent / "static" / "wallpaper_config.json"
+
+def _load_wallpaper_config():
+    if WALLPAPER_CFG.exists():
+        try:
+            return json.loads(WALLPAPER_CFG.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"custom_text": ""}
+
+def _save_wallpaper_config(cfg):
+    try:
+        WALLPAPER_CFG.parent.mkdir(parents=True, exist_ok=True)
+        WALLPAPER_CFG.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as e:
+        print(f"[Wallpaper] Error saving config: {e}")
 
 def _init_wallpaper_version():
     if WALLPAPER_GIF.exists():
@@ -2560,6 +2576,12 @@ def upload_wallpaper():
     if preset not in ("tft_film", "vivid", "original"):
         preset = "tft_film"
 
+    custom_text = request.form.get("custom_text")
+    if custom_text is not None:
+        cfg = _load_wallpaper_config()
+        cfg["custom_text"] = custom_text.strip()
+        _save_wallpaper_config(cfg)
+
     WALLPAPER_BIN.parent.mkdir(parents=True, exist_ok=True)
     fname = (file.filename or "").lower()
     is_gif = fname.endswith(".gif") or (file.content_type or "").startswith("image/gif")
@@ -2681,6 +2703,7 @@ def get_wallpaper_preview():
 @app.route("/api/wallpaper/info", methods=["GET"])
 def get_wallpaper_info():
     """Trạng thái ảnh nền hiện tại"""
+    cfg = _load_wallpaper_config()
     is_gif = WALLPAPER_GIF.exists()
     has_static = WALLPAPER_BIN.exists()
     available = is_gif or has_static
@@ -2694,7 +2717,26 @@ def get_wallpaper_info():
         "available": available,
         "is_gif": is_gif,
         "version": _wallpaper_version,
-        "size_bytes": size
+        "size_bytes": size,
+        "custom_text": cfg.get("custom_text", "")
+    })
+
+
+@app.route("/api/wallpaper/text", methods=["POST"])
+def set_wallpaper_text():
+    """Lưu chữ tùy chỉnh hiển thị cạnh tên bài hát trên màn hình ảnh nền ESP32"""
+    global _wallpaper_version
+    data = request.get_json(silent=True) or request.form.to_dict()
+    custom_text = str(data.get("custom_text", "")).strip()
+    cfg = _load_wallpaper_config()
+    cfg["custom_text"] = custom_text
+    _save_wallpaper_config(cfg)
+    _wallpaper_version = int(time.time())
+    print(f"[Wallpaper] Updated custom text: '{custom_text}', version: {_wallpaper_version}")
+    return jsonify({
+        "status": "ok",
+        "custom_text": custom_text,
+        "version": _wallpaper_version
     })
 
 

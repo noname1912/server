@@ -1839,9 +1839,9 @@
                   </div>
                 </div>
 
-                <!-- Status o day -->
-                <div style="text-align:center; font-size:10px; font-weight:600; color:var(--sc-orange); text-shadow:0 1px 5px rgba(0,0,0,0.9);">
-                  >> Smart Clock Ready
+                <!-- Status / Song Marquee Pill o day (Khop 100% ESP32) -->
+                <div id="wpPreviewSongLine" style="text-align:center; font-size:9.5px; font-weight:700; color:var(--sc-orange); background:rgba(8,65,100,0.85); border:1px solid var(--sc-orange); border-radius:5px; padding:3px 8px; margin:0 4px; overflow:hidden; white-space:nowrap; text-shadow:0 1px 4px #000;">
+                  &gt;&gt; DJ Thái Hoàng - "chữ tôi muốn thêm vào" &lt;&lt;
                 </div>
               </div>
             </div>
@@ -1865,6 +1865,26 @@
               </div>
               <div style="font-size:0.74rem; color:var(--sc-text-dim); margin-top:8px; line-height:1.4;">
                 💡 <b>Giải pháp chống bạc trắng:</b> Chế độ <b>TFT Film</b> tự động nén dải sáng (Highlight Roll-off) giúp da mặt & mây trời không bị bệt trắng bởi đèn nền LED, tăng độ tương phản và khử răng cưa Floyd-Steinberg mịn màng.
+              </div>
+            </div>
+
+            <!-- Chữ tùy chỉnh kèm tên bài hát -->
+            <div style="margin-top:14px; text-align:left; background:var(--sc-surface-1); border:1px solid var(--sc-border); border-radius:12px; padding:12px 14px;">
+              <div style="font-weight:700; font-size:0.85rem; color:var(--sc-text-main); margin-bottom:8px; display:flex; align-items:center; justify-content:space-between;">
+                <span><i class="fa-solid fa-pen-nib" style="color:var(--sc-orange); margin-right:6px;"></i> Chữ Hiển Thị Kèm Tên Bài Hát (Chữ Chạy):</span>
+                <span style="font-size:0.75rem; color:var(--sc-orange); font-weight:600;" id="wpTextSaveStatus">Đã đồng bộ</span>
+              </div>
+              <div style="display:flex; gap:8px;">
+                <input type="text" id="wpCustomTextInput" placeholder='Ví dụ: "chữ tôi muốn thêm vào", Nonstop cực căng, Music Box...' 
+                       style="flex:1; background:var(--sc-surface-2); border:1px solid var(--sc-border); border-radius:8px; padding:8px 12px; color:var(--sc-text-main); font-size:0.85rem;" 
+                       oninput="handleWallpaperCustomTextInput()" />
+                <button type="button" class="btn-sc-outline" onclick="saveWallpaperCustomText()" style="font-size:0.82rem; padding:8px 16px; white-space:nowrap; border-color:var(--sc-orange); color:var(--sc-orange); font-weight:600;">
+                  <i class="fa-solid fa-floppy-disk"></i> Lưu Chữ
+                </button>
+              </div>
+              <div style="font-size:0.74rem; color:var(--sc-text-dim); margin-top:8px; line-height:1.4;">
+                💡 <b>Ví dụ:</b> Nếu đang phát bài của <i>DJ Thái Hoàng</i>, trên màn hình ảnh nền ESP32 sẽ chạy chữ: 
+                <b style="color:var(--sc-orange);" id="wpCustomTextExample">&gt;&gt; DJ Thái Hoàng - "chữ tôi muốn thêm vào" &lt;&lt;</b>
               </div>
             </div>
 
@@ -3025,6 +3045,7 @@
           if (tn) checkAndApplyMarquee(tn);
         }
       }
+      updateWallpaperPreviewText();
     }
 
     // ─── Realtime Status Polling (Sync with Server & ESP32) ───
@@ -3302,6 +3323,68 @@
     // ─── Clock Wallpaper Management ─────────────────────────
     let selectedWallpaperFile = null;
     let selectedWallpaperPreset = 'tft_film';
+    let wallpaperCustomText = "";
+
+    function handleWallpaperCustomTextInput() {
+      const input = document.getElementById('wpCustomTextInput');
+      wallpaperCustomText = input ? input.value : "";
+      updateWallpaperPreviewText();
+      const status = document.getElementById('wpTextSaveStatus');
+      if (status) {
+        status.textContent = 'Chưa lưu (Bấm nút Lưu Chữ)';
+        status.style.color = 'var(--sc-text-dim)';
+      }
+    }
+
+    function updateWallpaperPreviewText() {
+      const line = document.getElementById('wpPreviewSongLine');
+      const ex = document.getElementById('wpCustomTextExample');
+      const text = wallpaperCustomText ? wallpaperCustomText.trim() : '';
+      const nowSongTitle = (currentSong && currentSong.title) ? currentSong.title : 'DJ Thái Hoàng';
+      const full = text ? `${nowSongTitle} - "${text}"` : `${nowSongTitle} - Smart Clock`;
+      if (line) line.textContent = `>> ${full} <<`;
+      if (ex) ex.textContent = `>> ${full} <<`;
+    }
+
+    async function saveWallpaperCustomText() {
+      const input = document.getElementById('wpCustomTextInput');
+      const status = document.getElementById('wpTextSaveStatus');
+      const text = input ? input.value.trim() : '';
+      if (status) {
+        status.textContent = 'Đang lưu...';
+        status.style.color = 'var(--sc-orange)';
+      }
+      try {
+        const res = await fetch('/api/wallpaper/text', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ custom_text: text })
+        });
+        if (res.ok) {
+          wallpaperCustomText = text;
+          updateWallpaperPreviewText();
+          if (status) {
+            status.textContent = 'Đã lưu thành công!';
+            status.style.color = '#22c55e';
+            setTimeout(() => {
+              status.textContent = 'Đã đồng bộ';
+              status.style.color = 'var(--sc-orange)';
+            }, 3000);
+          }
+          showToast('Đã lưu chữ hiển thị cho màn hình ảnh nền ESP32!');
+        } else {
+          if (status) {
+            status.textContent = 'Lỗi lưu';
+            status.style.color = '#ef4444';
+          }
+        }
+      } catch (e) {
+        if (status) {
+          status.textContent = 'Lỗi kết nối';
+          status.style.color = '#ef4444';
+        }
+      }
+    }
 
     function selectWallpaperPreset(preset) {
       selectedWallpaperPreset = preset;
@@ -3373,6 +3456,7 @@
         const formData = new FormData();
         formData.append('file', selectedWallpaperFile);
         formData.append('preset', selectedWallpaperPreset);
+        if (wallpaperCustomText) formData.append('custom_text', wallpaperCustomText);
 
         const res = await fetch('/api/wallpaper/upload', {
           method: 'POST',
@@ -3402,6 +3486,14 @@
       try {
         const res = await fetch('/api/wallpaper/info');
         const data = await res.json();
+        if (data.custom_text !== undefined) {
+          wallpaperCustomText = data.custom_text;
+          const input = document.getElementById('wpCustomTextInput');
+          if (input && document.activeElement !== input) {
+            input.value = wallpaperCustomText;
+          }
+          updateWallpaperPreviewText();
+        }
         if (data.available) {
           statusEl.innerHTML = `✅ Đã có ảnh nền trên máy chủ (${(data.size_bytes / 1024).toFixed(1)} KB)<br><span style="font-size:0.75rem; color:var(--sc-orange);">ESP32 sẽ tự tải và hiển thị khi vào màn hình đồng hồ</span>`;
           if (!selectedWallpaperFile) {
