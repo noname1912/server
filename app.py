@@ -194,6 +194,28 @@ def _resolve_url_sync(platform: str, song_id: str, timeout: float = 10.0) -> str
                         _stream_cache.clear()
                     _stream_cache[cache_key] = u
                 _prefetch_fmp4(u, platform)
+                # Tự động bổ sung metadata cho bài đang phát nếu bị thiếu
+                try:
+                    with _player_lock:
+                        curr_s = _player_state.get("song")
+                        if curr_s and str(curr_s.get("id")) == song_id:
+                            if curr_s.get("title") in ("Unknown", "", "None") or curr_s.get("artist") in ("Unknown", "", "None") or not curr_s.get("thumbnail"):
+                                m = _fetch_song_metadata(platform, song_id)
+                                if m:
+                                    if curr_s.get("title") in ("Unknown", "", "None") and m.get("title"):
+                                        curr_s["title"] = m["title"]
+                                    if curr_s.get("artist") in ("Unknown", "", "None") and m.get("artist"):
+                                        curr_s["artist"] = m["artist"]
+                                    if not curr_s.get("thumbnail") and m.get("thumbnail"):
+                                        curr_s["thumbnail"] = m["thumbnail"]
+                                    if not curr_s.get("duration") and m.get("duration"):
+                                        curr_s["duration"] = m["duration"]
+                                    try:
+                                        db.add_play_history(curr_s)
+                                    except Exception:
+                                        pass
+                except Exception:
+                    pass
                 return u
         return None
     except Exception as ex:
@@ -203,6 +225,54 @@ def _resolve_url_sync(platform: str, song_id: str, timeout: float = 10.0) -> str
         with _resolving_lock:
             _resolving_events.pop(cache_key, None)
         ev.set()
+
+
+def _fetch_song_metadata(platform: str, song_id: str) -> dict:
+    """Lấy metadata thật (title, artist, thumbnail, duration) cho bài hát từ API nếu bị thiếu."""
+    platform = str(platform).lower()
+    song_id = str(song_id).strip()
+    if not song_id:
+        return {}
+
+    meta = {}
+    try:
+        if platform == "youtube" or (platform == "zing" and len(song_id) == 11 and not song_id.startswith("ZW")):
+            oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={song_id}&format=json"
+            req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            raw_t = data.get("title", "")
+            from platforms.youtube import _clean_title
+            meta["title"] = _clean_title(raw_t) if raw_t else ""
+            meta["artist"] = data.get("author_name", "YouTube")
+            meta["thumbnail"] = f"https://img.youtube.com/vi/{song_id}/mqdefault.jpg"
+            meta["duration"] = 180
+        elif platform == "soundcloud":
+            from platforms.soundcloud import _get_sc_client_id
+            cid = _get_sc_client_id()
+            sc_url = f"https://api-v2.soundcloud.com/tracks/{song_id}?client_id={cid}"
+            req = urllib.request.Request(sc_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            meta["title"] = data.get("title", "")
+            meta["artist"] = data.get("user", {}).get("username", "SoundCloud")
+            art = data.get("artwork_url") or data.get("user", {}).get("avatar_url") or ""
+            if art and "-large" in art:
+                art = art.replace("-large", "-t300x300")
+            meta["thumbnail"] = art
+            meta["duration"] = int(data.get("duration", 0) // 1000)
+        elif platform == "zing":
+            p = PLATFORMS.get("zing")
+            if p and hasattr(p, "search"):
+                s_res = p.search(song_id, limit=1)
+                if s_res:
+                    meta["title"] = s_res[0].get("title", "")
+                    meta["artist"] = s_res[0].get("artist", "ZingMP3")
+                    meta["thumbnail"] = s_res[0].get("thumbnail", "")
+                    meta["duration"] = s_res[0].get("duration", 180)
+    except Exception as ex_m:
+        print(f"[Metadata] Fetch metadata error for {platform}:{song_id}: {ex_m}")
+    return meta
 
 # ───────────────────────────────────────────────────────────────
 
@@ -1340,13 +1410,14 @@ def _download_and_cache_thumbnail(url: str, size: int = 32) -> bytes:
         if cache_key in _thumb_cache:
             return _thumb_cache[cache_key]
 
+    ref = "https://soundcloud.com/" if ("sndcdn" in url or "soundcloud" in url) else ("https://zingmp3.vn/" if "zing" in url else "https://www.youtube.com/")
     raw = None
     try:
         r = requests.get(url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Referer": "https://soundcloud.com/",
+            "Referer": ref,
             "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-        }, timeout=3.5, verify=False)
+        }, timeout=2.5, verify=False)
         if r.status_code == 200 and len(r.content) > 100:
             raw = r.content
     except Exception:
@@ -1360,9 +1431,9 @@ def _download_and_cache_thumbnail(url: str, size: int = 32) -> bytes:
             ctx.verify_mode = ssl.CERT_NONE
             req = urllib.request.Request(url, headers={
                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Referer": "https://soundcloud.com/",
+                "Referer": ref,
             })
-            with urllib.request.urlopen(req, timeout=3.5, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=2.5, context=ctx) as resp:
                 raw = resp.read()
         except Exception:
             pass
@@ -1528,8 +1599,10 @@ def thumbnail():
                         headers={"X-Width": str(size), "X-Height": str(size),
                                  "Content-Length": str(len(data))})
 
-    # Nếu tải thất bại (link chết hoặc timeout), trả về fallback nhưng KHÔNG cache
+    # Nếu tải thất bại (link chết hoặc timeout), trả về fallback VÀ cache lại để không bị đơ lần sau
     fallback = _make_fallback_rgb565(size, plat_hint)
+    with _thumb_lock:
+        _thumb_cache[cache_key] = fallback
     return Response(fallback, status=200, mimetype="application/octet-stream",
                     headers={"X-Width": str(size), "X-Height": str(size),
                              "Content-Length": str(len(fallback))})
@@ -1596,6 +1669,17 @@ def _auto_play_next(from_user: bool = False) -> bool:
     _player_state["seq"] = int(time.time() * 1000) % 2000000000
     _player_state["state"] = "playing"
     _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
+    if next_song.get("title") in ("Unknown", "", "None") or next_song.get("artist") in ("Unknown", "", "None") or not next_song.get("thumbnail"):
+        meta = _fetch_song_metadata(platform, song_id)
+        if meta:
+            if next_song.get("title") in ("Unknown", "", "None") and meta.get("title"):
+                next_song["title"] = meta["title"]
+            if next_song.get("artist") in ("Unknown", "", "None") and meta.get("artist"):
+                next_song["artist"] = meta["artist"]
+            if not next_song.get("thumbnail") and meta.get("thumbnail"):
+                next_song["thumbnail"] = meta["thumbnail"]
+            if not next_song.get("duration") and meta.get("duration"):
+                next_song["duration"] = meta["duration"]
     _player_state["song"] = next_song
     _player_state["elapsed"] = 0
     try:
@@ -1639,11 +1723,24 @@ def player_play():
     song_info = {
         "id": song_id,
         "platform": platform,
-        "title": data.get("title", "Unknown"),
-        "artist": data.get("artist", "Unknown"),
-        "thumbnail": data.get("thumbnail", ""),
+        "title": data.get("title") or "Unknown",
+        "artist": data.get("artist") or "Unknown",
+        "thumbnail": data.get("thumbnail") or "",
         "duration": int(data.get("duration", 0)),
     }
+
+    # Tự động bổ sung metadata thật nếu title / artist / thumbnail bị thiếu hoặc là "Unknown"
+    if song_info["title"] in ("Unknown", "", "None") or song_info["artist"] in ("Unknown", "", "None") or not song_info["thumbnail"]:
+        meta = _fetch_song_metadata(platform, song_id)
+        if meta:
+            if song_info["title"] in ("Unknown", "", "None") and meta.get("title"):
+                song_info["title"] = meta["title"]
+            if song_info["artist"] in ("Unknown", "", "None") and meta.get("artist"):
+                song_info["artist"] = meta["artist"]
+            if not song_info["thumbnail"] and meta.get("thumbnail"):
+                song_info["thumbnail"] = meta["thumbnail"]
+            if not song_info["duration"] and meta.get("duration"):
+                song_info["duration"] = meta["duration"]
 
     # Kích hoạt phân giải URL ngầm ngay lập tức (không chặn phản hồi của nút bấm Play)
     with _cache_lock:
@@ -2724,6 +2821,15 @@ def debug_journal():
     try:
         out = subprocess.check_output(["journalctl", "-u", "esp32-player.service", "-n", "200", "--no-pager"], timeout=3.0)
         return Response(out, mimetype="text/plain; charset=utf-8")
+    except Exception as e:
+        return str(e), 500
+
+
+@app.route("/api/admin/clean_db")
+def admin_clean_db():
+    try:
+        db.cleanup_bad_history()
+        return jsonify({"status": "ok", "message": "Database cleaned"})
     except Exception as e:
         return str(e), 500
 

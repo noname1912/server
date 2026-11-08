@@ -76,6 +76,10 @@ def init_db():
             )
         """)
     conn.close()
+    try:
+        cleanup_bad_history()
+    except Exception:
+        pass
     print(f"[DB] SQLite database initialized at: {DB_PATH}")
 
 
@@ -346,10 +350,31 @@ def get_favorite_ids() -> list[str]:
 
 # ─── Play History (Tối đa 20 bài gần nhất) ──────────────────────
 
+def cleanup_bad_history():
+    """Xóa các bản ghi rác bị Unknown hoặc không có tên/tác giả/ảnh trong database."""
+    conn = get_db()
+    try:
+        with conn:
+            conn.execute("""
+                DELETE FROM play_history 
+                WHERE (title IN ('Unknown', '', 'None') OR title LIKE 'SoundCloud Track%' OR title LIKE 'Zing MP3 Track%') 
+                  AND (artist IN ('Unknown', '', 'None') OR thumbnail = '');
+            """)
+    except Exception as ex:
+        print(f"[DB] Cleanup bad history error: {ex}")
+    finally:
+        conn.close()
+
+
 def add_play_history(song: dict):
     """Lưu bài hát vào lịch sử nghe, giữ tối đa 20 bài gần nhất."""
     song_id = str(song.get("id") or song.get("song_id") or "").strip()
     if not song_id:
+        return
+    title = str(song.get("title") or "").strip()
+    artist = str(song.get("artist") or "").strip()
+    # Không lưu các bài rác hoàn toàn không có tên hoặc "Unknown" cả title lẫn artist
+    if (not title or title in ("Unknown", "None")) and (not artist or artist in ("Unknown", "None", "")):
         return
     conn = get_db()
     try:
