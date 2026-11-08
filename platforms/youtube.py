@@ -79,10 +79,14 @@ def _innertube_search(query: str, limit: int = 20) -> list:
                     vid = vr.get("videoId")
                     title = "".join(r.get("text", "") for r in vr.get("title", {}).get("runs", []))
                     artist = "".join(r.get("text", "") for r in vr.get("ownerText", {}).get("runs", []))
-                    dur_str = vr.get("lengthText", {}).get("simpleText", "0:00")
-                    dur = parse_dur(dur_str)
+                    dur_str = vr.get("lengthText", {}).get("simpleText", "")
+                    if not dur_str and vr.get("lengthText", {}).get("runs"):
+                        dur_str = "".join(r.get("text", "") for r in vr["lengthText"]["runs"])
+                    dur = parse_dur(dur_str or "0:00")
                     if dur > 3600:
                         continue
+                    if dur <= 0:
+                        dur = 180
                     if vid and title:
                         items.append({
                             "id": vid,
@@ -128,8 +132,12 @@ class YouTubePlatform:
                         continue
                     # Bỏ qua video quá dài (> 1 tiếng)
                     dur = int(e.get("duration") or 0)
+                    if dur <= 0:
+                        dur = 180
                     if dur > 3600:
                         continue
+                    if dur <= 0:
+                        dur = 180
                     results.append({
                         "id":       e.get("id", ""),
                         "title":    _clean_title(e.get("title", "Unknown")),
@@ -196,6 +204,8 @@ class YouTubePlatform:
                     if not vid_id:
                         continue
                     dur = int(e.get("duration") or 0)
+                    if dur <= 0:
+                        dur = 180
                     results.append({
                         "id": vid_id,
                         "title": _clean_title(e.get("title", "Unknown")),

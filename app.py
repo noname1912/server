@@ -199,7 +199,7 @@ def _resolve_url_sync(platform: str, song_id: str, timeout: float = 10.0) -> str
                     with _player_lock:
                         curr_s = _player_state.get("song")
                         if curr_s and str(curr_s.get("id")) == song_id:
-                            if curr_s.get("title") in ("Unknown", "", "None") or curr_s.get("artist") in ("Unknown", "", "None") or not curr_s.get("thumbnail"):
+                            if curr_s.get("title") in ("Unknown", "", "None") or curr_s.get("artist") in ("Unknown", "", "None") or not curr_s.get("thumbnail") or not curr_s.get("duration"):
                                 m = _fetch_song_metadata(platform, song_id)
                                 if m:
                                     if curr_s.get("title") in ("Unknown", "", "None") and m.get("title"):
@@ -210,10 +210,12 @@ def _resolve_url_sync(platform: str, song_id: str, timeout: float = 10.0) -> str
                                         curr_s["thumbnail"] = m["thumbnail"]
                                     if not curr_s.get("duration") and m.get("duration"):
                                         curr_s["duration"] = m["duration"]
-                                    try:
-                                        db.add_play_history(curr_s)
-                                    except Exception:
-                                        pass
+                            if not curr_s.get("duration") or int(curr_s.get("duration") or 0) <= 0:
+                                curr_s["duration"] = 180
+                            try:
+                                db.add_play_history(curr_s)
+                            except Exception:
+                                pass
                 except Exception:
                     pass
                 return u
@@ -237,16 +239,42 @@ def _fetch_song_metadata(platform: str, song_id: str) -> dict:
     meta = {}
     try:
         if platform == "youtube" or (platform == "zing" and len(song_id) == 11 and not song_id.startswith("ZW")):
-            oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={song_id}&format=json"
-            req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=3.0) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            raw_t = data.get("title", "")
-            from platforms.youtube import _clean_title
-            meta["title"] = _clean_title(raw_t) if raw_t else ""
-            meta["artist"] = data.get("author_name", "YouTube")
-            meta["thumbnail"] = f"https://img.youtube.com/vi/{song_id}/mqdefault.jpg"
-            meta["duration"] = 180
+            # 1. Thử YouTube InnerTube Player API để lấy duration thật chính xác
+            try:
+                req_p = urllib.request.Request(
+                    "https://www.youtube.com/youtubei/v1/player",
+                    data=json.dumps({
+                        "context": {"client": {"clientName": "WEB", "clientVersion": "2.20231201.00.00"}},
+                        "videoId": song_id
+                    }).encode(),
+                    headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
+                )
+                with urllib.request.urlopen(req_p, timeout=3.0) as resp_p:
+                    pdata = json.loads(resp_p.read().decode("utf-8"))
+                vd = pdata.get("videoDetails", {})
+                if vd.get("title"):
+                    from platforms.youtube import _clean_title
+                    meta["title"] = _clean_title(vd["title"])
+                    meta["artist"] = vd.get("author", "YouTube")
+                    meta["thumbnail"] = f"https://img.youtube.com/vi/{song_id}/mqdefault.jpg"
+                    dur = int(vd.get("lengthSeconds") or 0)
+                    meta["duration"] = dur if dur > 0 else 180
+            except Exception as ex_p:
+                print(f"[Metadata] YouTube player API: {ex_p}")
+
+            # 2. Fallback sang oEmbed nếu chưa lấy được title
+            if not meta.get("title"):
+                oembed_url = f"https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v={song_id}&format=json"
+                req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                raw_t = data.get("title", "")
+                from platforms.youtube import _clean_title
+                meta["title"] = _clean_title(raw_t) if raw_t else ""
+                meta["artist"] = data.get("author_name", "YouTube")
+                meta["thumbnail"] = f"https://img.youtube.com/vi/{song_id}/mqdefault.jpg"
+                if not meta.get("duration"):
+                    meta["duration"] = 180
         elif platform == "soundcloud":
             from platforms.soundcloud import _get_sc_client_id
             cid = _get_sc_client_id()
@@ -260,7 +288,8 @@ def _fetch_song_metadata(platform: str, song_id: str) -> dict:
             if art and "-large" in art:
                 art = art.replace("-large", "-t300x300")
             meta["thumbnail"] = art
-            meta["duration"] = int(data.get("duration", 0) // 1000)
+            dur = int(data.get("duration", 0) // 1000)
+            meta["duration"] = dur if dur > 0 else 180
         elif platform == "zing":
             p = PLATFORMS.get("zing")
             if p and hasattr(p, "search"):
@@ -269,9 +298,12 @@ def _fetch_song_metadata(platform: str, song_id: str) -> dict:
                     meta["title"] = s_res[0].get("title", "")
                     meta["artist"] = s_res[0].get("artist", "ZingMP3")
                     meta["thumbnail"] = s_res[0].get("thumbnail", "")
-                    meta["duration"] = s_res[0].get("duration", 180)
+                    dur = int(s_res[0].get("duration") or 0)
+                    meta["duration"] = dur if dur > 0 else 180
     except Exception as ex_m:
         print(f"[Metadata] Fetch metadata error for {platform}:{song_id}: {ex_m}")
+    if not meta.get("duration") or meta["duration"] <= 0:
+        meta["duration"] = 180
     return meta
 
 # ───────────────────────────────────────────────────────────────
@@ -806,6 +838,10 @@ def recommendations():
                         s["rec_reason"] = "Xu hướng"
                         collected_songs.append(s)
             except Exception: pass
+
+        for s in collected_songs:
+            dur = int(s.get("duration") or 0)
+            s["duration"] = dur if dur > 0 else 180
 
         final_songs = collected_songs[:limit]
 
@@ -1669,7 +1705,7 @@ def _auto_play_next(from_user: bool = False) -> bool:
     _player_state["seq"] = int(time.time() * 1000) % 2000000000
     _player_state["state"] = "playing"
     _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
-    if next_song.get("title") in ("Unknown", "", "None") or next_song.get("artist") in ("Unknown", "", "None") or not next_song.get("thumbnail"):
+    if next_song.get("title") in ("Unknown", "", "None") or next_song.get("artist") in ("Unknown", "", "None") or not next_song.get("thumbnail") or not next_song.get("duration"):
         meta = _fetch_song_metadata(platform, song_id)
         if meta:
             if next_song.get("title") in ("Unknown", "", "None") and meta.get("title"):
@@ -1680,6 +1716,8 @@ def _auto_play_next(from_user: bool = False) -> bool:
                 next_song["thumbnail"] = meta["thumbnail"]
             if not next_song.get("duration") and meta.get("duration"):
                 next_song["duration"] = meta["duration"]
+    if not next_song.get("duration") or int(next_song.get("duration") or 0) <= 0:
+        next_song["duration"] = 180
     _player_state["song"] = next_song
     _player_state["elapsed"] = 0
     try:
@@ -1729,8 +1767,8 @@ def player_play():
         "duration": int(data.get("duration", 0)),
     }
 
-    # Tự động bổ sung metadata thật nếu title / artist / thumbnail bị thiếu hoặc là "Unknown"
-    if song_info["title"] in ("Unknown", "", "None") or song_info["artist"] in ("Unknown", "", "None") or not song_info["thumbnail"]:
+    # Tự động bổ sung metadata thật nếu title / artist / thumbnail / duration bị thiếu hoặc là "Unknown"
+    if song_info["title"] in ("Unknown", "", "None") or song_info["artist"] in ("Unknown", "", "None") or not song_info["thumbnail"] or not song_info.get("duration"):
         meta = _fetch_song_metadata(platform, song_id)
         if meta:
             if song_info["title"] in ("Unknown", "", "None") and meta.get("title"):
@@ -1741,6 +1779,8 @@ def player_play():
                 song_info["thumbnail"] = meta["thumbnail"]
             if not song_info["duration"] and meta.get("duration"):
                 song_info["duration"] = meta["duration"]
+    if not song_info.get("duration") or int(song_info.get("duration") or 0) <= 0:
+        song_info["duration"] = 180
 
     # Kích hoạt phân giải URL ngầm ngay lập tức (không chặn phản hồi của nút bấm Play)
     with _cache_lock:
@@ -1830,6 +1870,8 @@ def player_control():
                 _player_state["seq"] = int(time.time() * 1000) % 2000000000
                 _player_state["state"] = "playing"
                 _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
+                if not prev_song.get("duration") or int(prev_song.get("duration") or 0) <= 0:
+                    prev_song["duration"] = 180
                 _player_state["song"] = prev_song
                 _player_state["elapsed"] = 0
                 try: db.add_play_history(prev_song)
@@ -1876,7 +1918,7 @@ def player_queue_add():
             "title": str(song.get("title", "Unknown")),
             "artist": str(song.get("artist", "Unknown")),
             "thumbnail": str(song.get("thumbnail", "")),
-            "duration": int(song.get("duration", 0)),
+            "duration": int(song.get("duration", 0)) if int(song.get("duration", 0)) > 0 else 180,
         }
 
         if position == "next" and _playlist:
@@ -1996,6 +2038,10 @@ def player_status():
         if url.startswith("/"):
             host = request.host
             url = f"http://{host}{url}"
+
+        curr_s = _player_state.get("song")
+        if curr_s and (not curr_s.get("duration") or int(curr_s.get("duration") or 0) <= 0):
+            curr_s["duration"] = 180
 
         resp = {
             "status": "ok",

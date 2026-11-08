@@ -72,6 +72,8 @@ class ZingMP3Platform:
                     dur = int(e.get("duration") or 0)
                     if dur > 3600:
                         continue
+                    if dur <= 0:
+                        dur = 180
                     vid_id = e.get("id", "")
                     if not vid_id:
                         continue

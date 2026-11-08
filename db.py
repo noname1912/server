@@ -333,7 +333,11 @@ def get_favorites() -> list[dict]:
             FROM favorites
             ORDER BY created_at DESC
         """)
-        return [dict(row) for row in cursor.fetchall()]
+        rows = [dict(row) for row in cursor.fetchall()]
+        for r in rows:
+            if not r.get("duration") or int(r.get("duration") or 0) <= 0:
+                r["duration"] = 180
+        return rows
     finally:
         conn.close()
 
@@ -351,7 +355,7 @@ def get_favorite_ids() -> list[str]:
 # ─── Play History (Tối đa 20 bài gần nhất) ──────────────────────
 
 def cleanup_bad_history():
-    """Xóa các bản ghi rác bị Unknown hoặc không có tên/tác giả/ảnh trong database."""
+    """Xóa các bản ghi rác bị Unknown hoặc không có tên/tác giả/ảnh trong database và chuẩn hóa duration."""
     conn = get_db()
     try:
         with conn:
@@ -360,6 +364,8 @@ def cleanup_bad_history():
                 WHERE (title IN ('Unknown', '', 'None') OR title LIKE 'SoundCloud Track%' OR title LIKE 'Zing MP3 Track%') 
                   AND (artist IN ('Unknown', '', 'None') OR thumbnail = '');
             """)
+            conn.execute("UPDATE play_history SET duration = 180 WHERE duration IS NULL OR duration <= 0;")
+            conn.execute("UPDATE favorites SET duration = 180 WHERE duration IS NULL OR duration <= 0;")
     except Exception as ex:
         print(f"[DB] Cleanup bad history error: {ex}")
     finally:
@@ -413,7 +419,11 @@ def get_play_history(limit: int = 20) -> list[dict]:
             ORDER BY played_at DESC
             LIMIT ?
         """, (limit,))
-        return [dict(row) for row in cursor.fetchall()]
+        rows = [dict(row) for row in cursor.fetchall()]
+        for r in rows:
+            if not r.get("duration") or int(r.get("duration") or 0) <= 0:
+                r["duration"] = 180
+        return rows
     except Exception as ex:
         print(f"[DB] get_play_history error: {ex}")
         return []

@@ -2987,11 +2987,14 @@
           const isPlay = (data.state === 'playing');
           if (!currentSong || currentSong.id !== data.song.id || isPlaying !== isPlay) {
             updateNowPlayingUI(data.song, isPlay);
+          } else if (data.song.duration && data.song.duration > 0 && data.song.duration !== playbackDuration) {
+            playbackDuration = data.song.duration;
+            document.getElementById('totalTime').textContent = formatTime(playbackDuration);
           }
           if (data.elapsed !== undefined) {
             playbackElapsed = data.elapsed;
             document.getElementById('currTime').textContent = formatTime(playbackElapsed);
-            drawWaveform(playbackElapsed, playbackDuration || (data.song.duration || 1));
+            drawWaveform(playbackElapsed, playbackDuration || (data.song.duration || 180));
           }
         }
       } catch (err) {

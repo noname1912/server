@@ -161,6 +161,8 @@ class SoundCloudPlatform:
                     artist = user.get("username") or "SoundCloud"
                     dur_ms = t.get("duration") or 0
                     dur_sec = int(dur_ms // 1000)
+                    if dur_sec <= 0:
+                        dur_sec = 180
                     artwork = t.get("artwork_url") or user.get("avatar_url") or ""
                     if artwork and "-large" in artwork:
                         artwork = artwork.replace("-large", "-t300x300")
@@ -201,7 +203,7 @@ class SoundCloudPlatform:
                         "id":        track_id,
                         "title":     e.get("title", "Unknown"),
                         "artist":    e.get("uploader") or e.get("artist", "Unknown"),
-                        "duration":  int(e.get("duration") or 0),
+                        "duration":  int(e.get("duration") or 0) if int(e.get("duration") or 0) > 0 else 180,
                         "platform":  "soundcloud",
                         "thumbnail": _first_thumb(e.get("thumbnails", [])),
                     })
@@ -301,6 +303,8 @@ class SoundCloudPlatform:
                 artist = user.get("username") or "SoundCloud"
                 dur_ms = t.get("duration") or 0
                 dur_sec = int(dur_ms // 1000)
+                if dur_sec <= 0:
+                    dur_sec = 180
                 artwork = t.get("artwork_url") or user.get("avatar_url") or ""
                 if artwork and "-large" in artwork:
                     artwork = artwork.replace("-large", "-t300x300")
