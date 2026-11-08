@@ -17,13 +17,43 @@ from pathlib import Path
 import subprocess
 from urllib.parse import unquote
 
-# Ép hệ thống ưu tiên phân giải IPv4 để triệt tiêu hoàn toàn độ trễ 20s timeout IPv6 trên Linux VPS
+# Tối ưu hóa DNS siêu tốc: Tự động cấu hình 8.8.8.8 / 1.1.1.1 và đệm DNS RAM (0ms)
+_dns_cache = {}
+_dns_cache_lock = threading.Lock()
 _orig_getaddrinfo = socket.getaddrinfo
-def _prefer_ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+
+def _fast_cached_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     if family == 0 or family == socket.AF_UNSPEC:
         family = socket.AF_INET
-    return _orig_getaddrinfo(host, port, family, type, proto, flags)
-socket.getaddrinfo = _prefer_ipv4_getaddrinfo
+    now = time.time()
+    cache_key = (host, port, family, type, proto, flags)
+    with _dns_cache_lock:
+        if cache_key in _dns_cache:
+            ts, res = _dns_cache[cache_key]
+            if now - ts < 600:  # Đệm 10 phút
+                return res
+    res = _orig_getaddrinfo(host, port, family, type, proto, flags)
+    with _dns_cache_lock:
+        if len(_dns_cache) > 200:
+            _dns_cache.clear()
+        _dns_cache[cache_key] = (now, res)
+    return res
+
+socket.getaddrinfo = _fast_cached_getaddrinfo
+
+def _fix_system_dns():
+    try:
+        resolv_path = Path("/etc/resolv.conf")
+        if resolv_path.exists():
+            content = resolv_path.read_text(encoding="utf-8", errors="ignore")
+            if "8.8.8.8" not in content[:60]:
+                fast_dns = "options timeout:1 attempts:2\nnameserver 8.8.8.8\nnameserver 1.1.1.1\nnameserver 8.8.4.4\n" + content
+                resolv_path.write_text(fast_dns, encoding="utf-8")
+                print("[System-DNS] Successfully injected fast DNS (8.8.8.8, 1.1.1.1) into /etc/resolv.conf")
+    except Exception as e:
+        print(f"[System-DNS] Check/write warning: {e}")
+
+_fix_system_dns()
 
 from flask import (Flask, jsonify, request, render_template,
                    Response, stream_with_context, abort, send_file)
