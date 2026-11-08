@@ -2297,7 +2297,12 @@ def get_wallpaper_info():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "version": "2.2-fast"})
+    git_hash = "unknown"
+    try:
+        git_hash = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], timeout=1.0).decode().strip()
+    except Exception:
+        pass
+    return jsonify({"status": "ok", "version": "2.3-instant", "commit": git_hash})
 
 
 @app.route("/api/debug/log")
