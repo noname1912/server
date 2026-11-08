@@ -352,7 +352,8 @@ class SoundCloudPlatform:
                         if trans:
                             _sc_track_transcodings[str(numeric_id)] = trans
                     progs = [x for x in trans if x.get("format", {}).get("protocol") == "progressive"]
-                    target = progs[0] if progs else (trans[0] if trans else None)
+                    hls_mp3 = [x for x in trans if x.get("format", {}).get("protocol") == "hls" and ("mpeg" in str(x.get("format", {}).get("mime_type", "")) or "mp3" in str(x.get("format", {}).get("mime_type", "")))]
+                    target = progs[0] if progs else (hls_mp3[0] if hls_mp3 else (trans[0] if trans else None))
                     if target and target.get("url"):
                         m_url = target["url"] + f"?client_id={cid}"
                         m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})

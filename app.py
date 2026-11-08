@@ -789,10 +789,6 @@ def stream_audio(platform: str, song_id: str):
 
         print(f"[Stream-Direct] Fast direct MP3 stream for {cache_key}")
         def generate_direct():
-            # Gửi ngay 4 frame MP3 silence (~0.1s) để Werkzeug nhả ngay HTTP 200 OK cho ESP32 Loa trong <1ms!
-            mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
-            yield mp3_burst
-
             f_cache = None
             try:
                 if tmp_mp3.exists():
@@ -862,15 +858,16 @@ def stream_audio(platform: str, song_id: str):
         "-nostdin",
         "-y",
         "-loglevel", "error",
-        "-probesize", "32768",
-        "-analyzeduration", "100000",
-        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "-probesize", "65536",
+        "-analyzeduration", "200000",
+        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     ]
     if ref:
         cmd.extend(["-referer", ref])
     if is_m3u8:
+        # Bắt buộc phải có hls,data,applehttp để giải mã HLS m3u8 playlist không bị lỗi
         cmd.extend([
-            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp",
         ])
     cmd.extend([
         "-i", audio_url,
@@ -888,10 +885,6 @@ def stream_audio(platform: str, song_id: str):
     ])
 
     def generate_pipe():
-        # Gửi ngay 4 frame MP3 silence (~0.1s) để Werkzeug nhả ngay HTTP 200 OK cho ESP32 Loa trong <1ms!
-        mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
-        yield mp3_burst
-
         f_cache = None
         try:
             if tmp_mp3.exists():
@@ -904,15 +897,17 @@ def stream_audio(platform: str, song_id: str):
         proc = None
         try:
             # bufsize=0: unbuffered binary pipe để chunk đầu tiên có ngay lập tức (<50ms)
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, bufsize=0)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, bufsize=0)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             first_chunk = True
             while True:
-                # Chunk đầu tiên 1024 bytes để đẩy nhanh HTTP 200 OK về cho ESP32
                 chunk_size = 1024 if first_chunk else 4096
                 chunk = proc.stdout.read(chunk_size)
                 first_chunk = False
                 if not chunk:
+                    if proc.poll() is not None and proc.returncode != 0:
+                        err = proc.stderr.read().decode(errors="ignore")
+                        print(f"[Stream-Pipe] FFmpeg failed with code {proc.returncode}: {err[:200]}")
                     break
                 if f_cache:
                     try: f_cache.write(chunk)
