@@ -59,6 +59,67 @@ _cache_lock = threading.Lock()
 _resolving_events: dict[str, threading.Event] = {}
 _resolving_lock = threading.Lock()
 
+def _get_referer(platform: str) -> str:
+    return {
+        "zing":       "https://zingmp3.vn/",
+        "soundcloud": "https://soundcloud.com/",
+        "youtube":    "https://www.youtube.com/",
+    }.get(platform, "")
+
+# Bộ nhớ đệm fMP4 & HLS m3u8 playlist siêu tốc (0ms network round-trip cho Loa ESP32)
+_m3u8_cache: dict[str, tuple[float, str, bytes, bytes, list[str], str]] = {}
+# key: audio_url -> (timestamp, m3u8_text, init_bytes, seg0_bytes, seg_urls, init_url)
+
+def _prefetch_fmp4(url: str, platform: str = ""):
+    """Tải trước ngầm m3u8 và init.mp4 + seg0.m4s để khi ESP32 Loa gọi tới có dữ liệu tức thì (0ms)"""
+    if not url or not any(k in url.lower() for k in (".m3u8", "playlist", "manifest", "/hls")):
+        return
+    def _worker():
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                    "Referer": _get_referer(platform),
+                }
+            )
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                text = resp.read().decode("utf-8", errors="ignore")
+            init_match = re.search(r'#EXT-X-MAP:URI="([^"]+)"', text)
+            if not init_match:
+                with _cache_lock:
+                    _m3u8_cache[url] = (time.time(), text, b"", b"", [], "")
+                return
+            raw_init = init_match.group(1)
+            init_url = raw_init if raw_init.startswith("http") else urllib.parse.urljoin(url, raw_init)
+            seg_urls = []
+            for line in text.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    seg_url = line if line.startswith("http") else urllib.parse.urljoin(url, line)
+                    seg_urls.append(seg_url)
+
+            init_bytes = b""
+            seg0_bytes = b""
+            if seg_urls:
+                try:
+                    req_i = urllib.request.Request(init_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req_i, timeout=4.0) as r:
+                        init_bytes = r.read()
+                    req_s0 = urllib.request.Request(seg_urls[0], headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req_s0, timeout=4.0) as r:
+                        seg0_bytes = r.read()
+                except Exception:
+                    pass
+            with _cache_lock:
+                if len(_m3u8_cache) > 50:
+                    _m3u8_cache.clear()
+                _m3u8_cache[url] = (time.time(), text, init_bytes, seg0_bytes, seg_urls, init_url)
+                print(f"[Prefetch-fMP4] Prefetched init ({len(init_bytes)}B) + seg0 ({len(seg0_bytes)}B) for {url[:50]}...")
+        except Exception as e:
+            pass
+    threading.Thread(target=_worker, daemon=True).start()
+
 def _resolve_url_sync(platform: str, song_id: str, timeout: float = 10.0) -> str:
     """
     Phân giải stream URL duy nhất và đồng bộ giữa background worker và stream request.
@@ -93,6 +154,7 @@ def _resolve_url_sync(platform: str, song_id: str, timeout: float = 10.0) -> str
                     if len(_stream_cache) > 200:
                         _stream_cache.clear()
                     _stream_cache[cache_key] = u
+                _prefetch_fmp4(u, platform)
                 return u
         return None
     except Exception as ex:
@@ -826,6 +888,11 @@ def stream_audio(platform: str, song_id: str):
 
         print(f"[Stream-Direct] Fast direct MP3 stream for {cache_key}")
         def generate_direct():
+            # Nhả ngay 4 frame MP3 sync frames (128kbps, 44.1kHz, Stereo silence ~0.1s)
+            # Giúp Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa trong <1ms cùng lúc với connecttohost!
+            mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
+            yield mp3_burst
+
             f_cache = None
             try:
                 if tmp_mp3.exists():
@@ -893,162 +960,179 @@ def stream_audio(platform: str, song_id: str):
     # FFmpeg nhận diện tức thì AAC codec và xuất ra chunk MP3 đầu tiên trong <0.3s!
     if is_m3u8 and has_ffmpeg:
         try:
-            req_m3u8 = urllib.request.Request(
-                audio_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-                    "Referer": _get_referer(platform),
-                }
-            )
-            with urllib.request.urlopen(req_m3u8, timeout=4.0) as m3u8_resp:
-                m3u8_text = m3u8_resp.read().decode("utf-8", errors="ignore")
+            m3u8_text = None
+            init_bytes = b""
+            seg0_bytes = b""
+            seg_urls = []
+            init_url = ""
+            with _cache_lock:
+                cached = _m3u8_cache.get(audio_url)
+                if cached and (time.time() - cached[0] < 300):
+                    _, m3u8_text, init_bytes, seg0_bytes, seg_urls, init_url = cached
 
-            init_match = re.search(r'#EXT-X-MAP:URI="([^"]+)"', m3u8_text)
-            if init_match:
-                raw_init = init_match.group(1)
-                init_url = raw_init if raw_init.startswith("http") else urllib.parse.urljoin(audio_url, raw_init)
-                seg_urls = []
-                for line in m3u8_text.splitlines():
-                    line = line.strip()
-                    if line and not line.startswith("#"):
-                        seg_url = line if line.startswith("http") else urllib.parse.urljoin(audio_url, line)
-                        seg_urls.append(seg_url)
+            if not m3u8_text:
+                req_m3u8 = urllib.request.Request(
+                    audio_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": _get_referer(platform),
+                    }
+                )
+                with urllib.request.urlopen(req_m3u8, timeout=4.0) as m3u8_resp:
+                    m3u8_text = m3u8_resp.read().decode("utf-8", errors="ignore")
 
-                if seg_urls:
-                    print(f"[Stream-fMP4] Ultra-fast engine triggered: {len(seg_urls)} segments for {cache_key}")
-                    def generate_fmp4():
-                        f_cache = None
-                        try:
-                            if tmp_mp3.exists():
-                                try: tmp_mp3.unlink()
-                                except Exception: pass
-                            f_cache = open(tmp_mp3, "wb")
-                        except Exception:
-                            pass
+                init_match = re.search(r'#EXT-X-MAP:URI="([^"]+)"', m3u8_text)
+                if init_match:
+                    raw_init = init_match.group(1)
+                    init_url = raw_init if raw_init.startswith("http") else urllib.parse.urljoin(audio_url, raw_init)
+                    for line in m3u8_text.splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            seg_url = line if line.startswith("http") else urllib.parse.urljoin(audio_url, line)
+                            seg_urls.append(seg_url)
 
-                        proc = None
-                        stop_event = threading.Event()
-                        try:
-                            # Tải trước init.mp4 và seg0.m4s (<0.25s)
+            if seg_urls and init_url:
+                print(f"[Stream-fMP4] Ultra-fast engine triggered: {len(seg_urls)} segments for {cache_key}")
+                def generate_fmp4():
+                    # Nhả ngay 4 frame MP3 sync frames (128kbps, 44.1kHz, Stereo silence ~0.1s)
+                    # Giúp Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa trong <1ms cùng lúc với connecttohost!
+                    mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
+                    yield mp3_burst
+
+                    f_cache = None
+                    try:
+                        if tmp_mp3.exists():
+                            try: tmp_mp3.unlink()
+                            except Exception: pass
+                        f_cache = open(tmp_mp3, "wb")
+                    except Exception:
+                        pass
+
+                    proc = None
+                    stop_event = threading.Event()
+                    try:
+                        i_bytes = init_bytes
+                        s0_bytes = seg0_bytes
+                        if not i_bytes:
                             req_i = urllib.request.Request(init_url, headers={"User-Agent": "Mozilla/5.0"})
                             with urllib.request.urlopen(req_i, timeout=5.0) as r:
-                                init_bytes = r.read()
+                                i_bytes = r.read()
 
+                        if not s0_bytes:
                             req_s0 = urllib.request.Request(seg_urls[0], headers={"User-Agent": "Mozilla/5.0"})
                             with urllib.request.urlopen(req_s0, timeout=5.0) as r:
-                                seg0_bytes = r.read()
+                                s0_bytes = r.read()
 
-                            ff_cmd = [
-                                "ffmpeg",
-                                "-y",
-                                "-threads", "2",
-                                "-loglevel", "error",
-                                "-i", "pipe:0",
-                                "-vn",
-                                "-af", "volume=0.85",
-                                "-acodec", "libmp3lame",
-                                "-b:a", "128k",
-                                "-ar", "44100",
-                                "-ac", "2",
-                                "-f", "mp3",
-                                "-write_xing", "0",
-                                "pipe:1"
-                            ]
+                        ff_cmd = [
+                            "ffmpeg",
+                            "-y",
+                            "-threads", "2",
+                            "-loglevel", "error",
+                            "-i", "pipe:0",
+                            "-vn",
+                            "-af", "volume=0.85",
+                            "-acodec", "libmp3lame",
+                            "-b:a", "128k",
+                            "-ar", "44100",
+                            "-ac", "2",
+                            "-f", "mp3",
+                            "-write_xing", "0",
+                            "pipe:1"
+                        ]
 
-                            proc = subprocess.Popen(
-                                ff_cmd,
-                                stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE,
-                                bufsize=65536
-                            )
+                        proc = subprocess.Popen(
+                            ff_cmd,
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            bufsize=65536
+                        )
 
-                            # Đẩy init.mp4 + seg0.m4s vào stdin để FFmpeg lập tức transcode MP3
-                            proc.stdin.write(init_bytes)
-                            proc.stdin.write(seg0_bytes)
-                            proc.stdin.flush()
-
-                            def _feeder():
-                                try:
-                                    for seg_url in seg_urls[1:]:
+                        def _feeder():
+                            try:
+                                # Bơm init.mp4 và seg0.m4s từ trong feeder thread để tránh deadlock pipe buffer
+                                proc.stdin.write(i_bytes)
+                                proc.stdin.write(s0_bytes)
+                                proc.stdin.flush()
+                                for seg_url in seg_urls[1:]:
+                                    if stop_event.is_set() or proc.poll() is not None:
+                                        break
+                                    try:
+                                        s_req = urllib.request.Request(seg_url, headers={"User-Agent": "Mozilla/5.0"})
+                                        with urllib.request.urlopen(s_req, timeout=8.0) as s_res:
+                                            s_data = s_res.read()
                                         if stop_event.is_set() or proc.poll() is not None:
                                             break
-                                        try:
-                                            s_req = urllib.request.Request(seg_url, headers={"User-Agent": "Mozilla/5.0"})
-                                            with urllib.request.urlopen(s_req, timeout=8.0) as s_res:
-                                                s_data = s_res.read()
-                                            if stop_event.is_set() or proc.poll() is not None:
-                                                break
-                                            proc.stdin.write(s_data)
-                                            proc.stdin.flush()
-                                        except Exception as ex_s:
-                                            print(f"[Stream-fMP4] Feeder error on segment: {ex_s}")
-                                            break
+                                        proc.stdin.write(s_data)
+                                        proc.stdin.flush()
+                                    except Exception as ex_s:
+                                        print(f"[Stream-fMP4] Feeder error on segment: {ex_s}")
+                                        break
+                            except Exception:
+                                pass
+                            finally:
+                                try:
+                                    if proc and proc.stdin and not proc.stdin.closed:
+                                        proc.stdin.close()
                                 except Exception:
                                     pass
-                                finally:
-                                    try:
-                                        if proc and proc.stdin and not proc.stdin.closed:
-                                            proc.stdin.close()
-                                    except Exception:
-                                        pass
 
-                            feeder_thread = threading.Thread(target=_feeder, daemon=True)
-                            feeder_thread.start()
+                        feeder_thread = threading.Thread(target=_feeder, daemon=True)
+                        feeder_thread.start()
 
-                            # Chunk đầu tiên 2048 bytes để Werkzeug gửi ngay HTTP 200 OK cho ESP32 Loa (<300ms)
-                            first_chunk = proc.stdout.read(2048)
-                            if not first_chunk:
-                                err = proc.stderr.read().decode(errors="ignore") if proc.stderr else ""
-                                print(f"[Stream-fMP4] FFmpeg failed on start: {err}")
-                                return
+                        # Chunk đầu tiên 2048 bytes để Werkzeug gửi ngay HTTP 200 OK cho ESP32 Loa (<300ms)
+                        first_chunk = proc.stdout.read(2048)
+                        if not first_chunk:
+                            err = proc.stderr.read().decode(errors="ignore") if proc.stderr else ""
+                            print(f"[Stream-fMP4] FFmpeg failed on start: {err}")
+                            return
 
+                        if f_cache:
+                            try: f_cache.write(first_chunk)
+                            except Exception: pass
+                        yield first_chunk
+
+                        while True:
+                            chunk = proc.stdout.read(8192)
+                            if not chunk:
+                                break
                             if f_cache:
-                                try: f_cache.write(first_chunk)
+                                try: f_cache.write(chunk)
                                 except Exception: pass
-                            yield first_chunk
+                            yield chunk
 
-                            while True:
-                                chunk = proc.stdout.read(8192)
-                                if not chunk:
-                                    break
-                                if f_cache:
-                                    try: f_cache.write(chunk)
+                        if f_cache:
+                            f_cache.close()
+                            f_cache = None
+                            if tmp_mp3.exists() and tmp_mp3.stat().st_size > 20000:
+                                if final_mp3.exists():
+                                    try: final_mp3.unlink()
                                     except Exception: pass
-                                yield chunk
+                                tmp_mp3.rename(final_mp3)
+                                print(f"[Stream-Cache] fMP4 complete cache: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
+                                _cleanup_old_cache(60)
 
-                            if f_cache:
-                                f_cache.close()
-                                f_cache = None
-                                if tmp_mp3.exists() and tmp_mp3.stat().st_size > 20000:
-                                    if final_mp3.exists():
-                                        try: final_mp3.unlink()
-                                        except Exception: pass
-                                    tmp_mp3.rename(final_mp3)
-                                    print(f"[Stream-Cache] fMP4 complete cache: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
-                                    _cleanup_old_cache(60)
-
-                        except Exception as e:
-                            print(f"[Stream-fMP4] Exception: {e}")
-                        finally:
-                            stop_event.set()
-                            if f_cache and not f_cache.closed:
-                                try: f_cache.close()
-                                except Exception: pass
-                            if proc:
+                    except Exception as e:
+                        print(f"[Stream-fMP4] Exception: {e}")
+                    finally:
+                        stop_event.set()
+                        if f_cache and not f_cache.closed:
+                            try: f_cache.close()
+                            except Exception: pass
+                        if proc:
+                            try:
+                                if proc.stdin and not proc.stdin.closed:
+                                    proc.stdin.close()
+                            except Exception: pass
+                            try:
+                                if proc.stdout and not proc.stdout.closed:
+                                    proc.stdout.close()
+                            except Exception: pass
+                            if proc.poll() is None:
                                 try:
-                                    if proc.stdin and not proc.stdin.closed:
-                                        proc.stdin.close()
+                                    proc.terminate()
+                                    proc.kill()
                                 except Exception: pass
-                                try:
-                                    if proc.stdout and not proc.stdout.closed:
-                                        proc.stdout.close()
-                                except Exception: pass
-                                if proc.poll() is None:
-                                    try:
-                                        proc.terminate()
-                                        proc.kill()
-                                    except Exception: pass
 
                     return Response(
                         stream_with_context(generate_fmp4()),
@@ -1106,6 +1190,11 @@ def stream_audio(platform: str, song_id: str):
     ])
 
     def generate_pipe():
+        # Nhả ngay 4 frame MP3 sync frames (128kbps, 44.1kHz, Stereo silence ~0.1s)
+        # Giúp Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa trong <1ms cùng lúc với connecttohost!
+        mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
+        yield mp3_burst
+
         f_cache = None
         try:
             if tmp_mp3.exists():
@@ -1181,13 +1270,6 @@ def stream_audio(platform: str, song_id: str):
         direct_passthrough=True,
     )
 
-
-def _get_referer(platform: str) -> str:
-    return {
-        "zing":       "https://zingmp3.vn/",
-        "soundcloud": "https://soundcloud.com/",
-        "youtube":    "https://www.youtube.com/",
-    }.get(platform, "")
 
 
 # ─── Thumbnail proxy — trả về raw RGB565 để ESP32 vẽ trực tiếp ─
@@ -1506,8 +1588,6 @@ def _auto_play_next(from_user: bool = False) -> bool:
     song_id  = str(next_song.get("id", "")).strip()
     if not song_id:
         return False
-    _player_state["seq"] = int(time.time() * 1000) % 2000000000
-    _player_state["state"] = "playing"
     if song_id.startswith("http"):
         import base64
         safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
@@ -1572,6 +1652,12 @@ def player_play():
         "duration": int(data.get("duration", 0)),
     }
 
+    # 1. Phân giải stream URL trước khi đổi seq để khi Loa connecttohost là CÓ LUỒNG NGAY LẬP TỨC (<0.1s)
+    cached_url = _resolve_url_sync(platform, song_id)
+    if cached_url and safe_id != song_id:
+        with _cache_lock:
+            _stream_cache[f"{platform}:{safe_id}"] = cached_url
+
     with _player_lock:
         global _playlist, _playlist_idx
         for i, s in enumerate(_playlist):
@@ -1594,14 +1680,6 @@ def player_play():
         print(f"[PlayerHub] Add history error: {ex_h}")
 
     print(f"[PlayerHub] PLAY #{_player_state['seq']}: {song_info.get('title')} ({platform})")
-
-    # Kích hoạt phân giải URL ngầm ngay lập tức (KHÔNG BLOCK MÀN HÌNH VÀ LOA)
-    def _bg_resolve():
-        u = _resolve_url_sync(platform, song_id)
-        if u and safe_id != song_id:
-            with _cache_lock:
-                _stream_cache[f"{platform}:{safe_id}"] = u
-    threading.Thread(target=_bg_resolve, daemon=True).start()
 
     return jsonify({"status": "ok", "seq": _player_state["seq"], "song": song_info})
 
