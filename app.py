@@ -2515,6 +2515,38 @@ def system_update():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@app.route("/api/debug/test_live")
+def debug_test_live():
+    song_id = request.args.get("id", "1544340955")
+    p = PLATFORMS["soundcloud"]
+    t0 = time.time()
+    audio_url = p.get_stream_url(song_id)
+    t_url = time.time() - t0
+
+    req = urllib.request.Request(audio_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        m3u8 = r.read().decode("utf-8", errors="ignore")
+
+    m3u8_live = m3u8.replace("#EXT-X-PLAYLIST-TYPE:VOD", "")
+    tmp_m3u8 = "/tmp/test_live.m3u8"
+    with open(tmp_m3u8, "w", encoding="utf-8") as f:
+        f.write(m3u8_live)
+
+    cmd = [
+        "ffmpeg", "-nostdin", "-y", "-loglevel", "error",
+        "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp",
+        "-probesize", "32768", "-analyzeduration", "0",
+        "-i", tmp_m3u8,
+        "-vn", "-acodec", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        "-f", "mp3", "-write_xing", "0", "pipe:1"
+    ]
+    t_ff = time.time()
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=65536)
+    chunk = proc.stdout.read(2048)
+    proc.terminate()
+    return f"URL in {t_url:.3f}s. First 2048 bytes from FFmpeg in {time.time()-t_ff:.3f}s!"
+
+
 @app.route("/api/debug/test_fmp4")
 def debug_test_fmp4():
     song_id = request.args.get("id", "1565599693")
