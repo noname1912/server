@@ -153,8 +153,9 @@ class SoundCloudPlatform:
                         continue
                     # Cache transcodings để lấy stream URL tức thì (<150ms) không cần gọi tracks/{id}
                     tr_list = t.get("media", {}).get("transcodings", [])
+                    t_auth = t.get("track_authorization", "")
                     if tr_list:
-                        _sc_track_transcodings[tid] = tr_list
+                        _sc_track_transcodings[tid] = (tr_list, t_auth)
                     title = t.get("title") or t.get("permalink") or "SoundCloud Track"
                     user = t.get("user") or {}
                     artist = user.get("username") or "SoundCloud"
@@ -291,8 +292,9 @@ class SoundCloudPlatform:
                     t = hydrated_map[tid]
 
                 tr_list = t.get("media", {}).get("transcodings", [])
+                t_auth = t.get("track_authorization", "")
                 if tr_list:
-                    _sc_track_transcodings[tid] = tr_list
+                    _sc_track_transcodings[tid] = (tr_list, t_auth)
 
                 title = t.get("title") or t.get("permalink") or "SoundCloud Track"
                 user = t.get("user") or {}
@@ -344,7 +346,15 @@ class SoundCloudPlatform:
                 numeric_id = m.group(1)
 
         if numeric_id:
-            trans = _sc_track_transcodings.get(str(numeric_id))
+            cached_entry = _sc_track_transcodings.get(str(numeric_id))
+            trans = None
+            t_auth = ""
+            if cached_entry:
+                if isinstance(cached_entry, tuple):
+                    trans, t_auth = cached_entry
+                else:
+                    trans = cached_entry
+
             for sc_attempt in range(2):
                 try:
                     cid = _get_sc_client_id()
@@ -354,8 +364,9 @@ class SoundCloudPlatform:
                         with urllib.request.urlopen(t_req, timeout=5.0) as t_res:
                             t_data = json.loads(t_res.read().decode("utf-8"))
                         trans = t_data.get("media", {}).get("transcodings", [])
+                        t_auth = t_data.get("track_authorization", "")
                         if trans:
-                            _sc_track_transcodings[str(numeric_id)] = trans
+                            _sc_track_transcodings[str(numeric_id)] = (trans, t_auth)
 
                     # Ưu tiên thứ tự định dạng tốt nhất:
                     # 1. Progressive (MP3 phát trực tiếp 0ms không cần transcode)
@@ -377,6 +388,8 @@ class SoundCloudPlatform:
                             continue
                         try:
                             m_url = candidate["url"] + f"?client_id={cid}"
+                            if t_auth:
+                                m_url += f"&track_authorization={t_auth}"
                             m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
                             with urllib.request.urlopen(m_req, timeout=5.0) as m_res:
                                 m_data = json.loads(m_res.read().decode("utf-8"))

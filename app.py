@@ -2630,6 +2630,43 @@ def debug_test_fmp4():
     return Response("\n".join(steps), mimetype="text/plain; charset=utf-8")
 
 
+@app.route("/api/debug/trace_resolve")
+def debug_trace_resolve():
+    song_id = request.args.get("id", "2379883092")
+    log = []
+    t0 = time.time()
+    from platforms import soundcloud
+    cid = soundcloud._get_sc_client_id()
+    log.append(f"Client ID: {cid} (all CIDs: {soundcloud._SC_CLIENT_IDS})")
+
+    t1 = time.time()
+    t_url = f"https://api-v2.soundcloud.com/tracks/{song_id}?client_id={cid}"
+    log.append(f"Calling tracks API: {t_url}")
+    try:
+        req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8.0) as r:
+            data = json.loads(r.read().decode("utf-8"))
+        log.append(f"Tracks API responded in {time.time()-t1:.3f}s: title={data.get('title')}")
+        trans = data.get("media", {}).get("transcodings", [])
+        log.append(f"Transcodings found: {len(trans)}")
+        for idx, tr in enumerate(trans):
+            fmt = tr.get("format")
+            u = tr.get("url")
+            t_tr = time.time()
+            try:
+                sub_req = urllib.request.Request(u + f"?client_id={cid}", headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(sub_req, timeout=8.0) as sub_res:
+                    sub_d = json.loads(sub_res.read().decode("utf-8"))
+                    log.append(f"  [{idx}] {fmt} -> SUCCESS in {time.time()-t_tr:.3f}s: {sub_d.get('url')[:60]}")
+            except Exception as e_sub:
+                log.append(f"  [{idx}] {fmt} -> FAILED in {time.time()-t_tr:.3f}s: {e_sub}")
+    except Exception as e:
+        log.append(f"Tracks API FAILED in {time.time()-t1:.3f}s: {e}")
+
+    log.append(f"Total trace time: {time.time()-t0:.3f}s")
+    return Response("\n".join(log), mimetype="text/plain; charset=utf-8")
+
+
 @app.route("/api/debug/journal")
 def debug_journal():
     try:
