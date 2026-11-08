@@ -53,9 +53,55 @@ app = Flask(__name__)
 CORS(app)
 db.init_db()
 
-# ─── Cache đơn giản cho stream URLs (tránh gọi API nhiều lần) ──
+# ─── Cache & Đồng bộ hóa phân giải stream URL (tránh gọi trùng lặp đa luồng) ──
 _stream_cache: dict[str, str] = {}
 _cache_lock = threading.Lock()
+_resolving_events: dict[str, threading.Event] = {}
+_resolving_lock = threading.Lock()
+
+def _resolve_url_sync(platform: str, song_id: str, timeout: float = 10.0) -> str:
+    """
+    Phân giải stream URL duy nhất và đồng bộ giữa background worker và stream request.
+    Nếu đang có luồng giải mã bài hát này, các luồng khác sẽ chờ Event thay vì gửi request trùng lặp.
+    """
+    cache_key = f"{platform}:{song_id}"
+    with _cache_lock:
+        if cache_key in _stream_cache:
+            return _stream_cache[cache_key]
+
+    with _resolving_lock:
+        if cache_key in _resolving_events:
+            ev = _resolving_events[cache_key]
+            is_worker = False
+        else:
+            ev = threading.Event()
+            _resolving_events[cache_key] = ev
+            is_worker = True
+
+    if not is_worker:
+        ev.wait(timeout=timeout)
+        with _cache_lock:
+            return _stream_cache.get(cache_key)
+
+    try:
+        p = PLATFORMS.get(platform)
+        if p and hasattr(p, "get_stream_url"):
+            print(f"[Stream] Resolving URL for {cache_key}...")
+            u = p.get_stream_url(song_id)
+            if u:
+                with _cache_lock:
+                    if len(_stream_cache) > 200:
+                        _stream_cache.clear()
+                    _stream_cache[cache_key] = u
+                return u
+        return None
+    except Exception as ex:
+        print(f"[Stream] Resolve error for {cache_key}: {ex}")
+        return None
+    finally:
+        with _resolving_lock:
+            _resolving_events.pop(cache_key, None)
+        ev.set()
 
 # ───────────────────────────────────────────────────────────────
 
@@ -759,24 +805,15 @@ def stream_audio(platform: str, song_id: str):
         return send_file(str(final_mp3), mimetype="audio/mpeg", conditional=True)
 
     # 2. NẾU CHƯA CÓ TRONG CACHE:
-    # Lấy stream URL gốc
+    # Lấy stream URL gốc (đồng bộ hóa chống gọi trùng lặp giữa background resolve và stream request)
     cache_key = f"{platform}:{song_id}"
-    with _cache_lock:
-        audio_url = _stream_cache.get(cache_key)
-
+    audio_url = _resolve_url_sync(platform, song_id)
     if not audio_url:
-        print(f"[Stream] Fetching URL for {platform}:{song_id}")
-        audio_url = PLATFORMS[platform].get_stream_url(song_id)
-        if not audio_url:
-            abort(404, "Cannot get stream URL")
-        with _cache_lock:
-            if len(_stream_cache) > 100:
-                _stream_cache.clear()
-            _stream_cache[cache_key] = audio_url
+        abort(404, "Cannot get stream URL")
 
     import shutil
     has_ffmpeg = bool(shutil.which("ffmpeg"))
-    is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower())
+    is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower()) or ("playlist" in audio_url.lower())
 
     # MP3 trực tiếp: SoundCloud progressive, Zing MP3, hoặc bất kỳ stream MP3 gốc nào
     # Phát trực tiếp bằng Direct Proxy (0ms delay, không qua FFmpeg để tránh nghẽn pipe / Cloudflare CDN stall)
@@ -857,6 +894,7 @@ def stream_audio(platform: str, song_id: str):
         "ffmpeg",
         "-nostdin",
         "-y",
+        "-threads", "2",
         "-loglevel", "error",
         "-probesize", "65536",
         "-analyzeduration", "200000",
@@ -879,8 +917,6 @@ def stream_audio(platform: str, song_id: str):
         "-ac", "2",
         "-f", "mp3",
         "-write_xing", "0",
-        "-fflags", "+nobuffer+flush_packets",
-        "-flush_packets", "1",
         "pipe:1"
     ])
 
@@ -896,14 +932,19 @@ def stream_audio(platform: str, song_id: str):
 
         proc = None
         try:
-            # bufsize=0: unbuffered binary pipe để chunk đầu tiên có ngay lập tức (<50ms)
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, bufsize=0)
+            # bufsize=65536 để FFmpeg giải mã mượt mà không bị nghẽn buffer trên HLS segments
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, bufsize=65536)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
-            first_chunk = True
+            # Chunk đầu tiên 8192 bytes để Werkzeug gửi ngay HTTP 200 OK và nạp đầy buffer ESP32 ban đầu
+            first_chunk = proc.stdout.read(8192)
+            if first_chunk:
+                if f_cache:
+                    try: f_cache.write(first_chunk)
+                    except Exception: pass
+                yield first_chunk
+
             while True:
-                chunk_size = 1024 if first_chunk else 4096
-                chunk = proc.stdout.read(chunk_size)
-                first_chunk = False
+                chunk = proc.stdout.read(8192)
                 if not chunk:
                     if proc.poll() is not None and proc.returncode != 0:
                         err = proc.stderr.read().decode(errors="ignore")
@@ -1285,20 +1326,10 @@ def _auto_play_next(from_user: bool = False) -> bool:
         safe_id = song_id
 
     # Phân giải stream URL trước khi kích hoạt lệnh phát để Loa có stream tức thì (0ms)
-    cached_url = None
-    with _cache_lock:
-        cached_url = _stream_cache.get(f"{platform}:{song_id}") or _stream_cache.get(f"{platform}:{safe_id}")
-    if not cached_url:
-        p_obj = PLATFORMS.get(platform)
-        if p_obj and hasattr(p_obj, "get_stream_url"):
-            try:
-                cached_url = p_obj.get_stream_url(song_id)
-                if cached_url:
-                    with _cache_lock:
-                        _stream_cache[f"{platform}:{song_id}"] = cached_url
-                        _stream_cache[f"{platform}:{safe_id}"] = cached_url
-            except Exception as ex_u:
-                print(f"[PlayerHub] Auto-next get stream URL error: {ex_u}")
+    cached_url = _resolve_url_sync(platform, song_id)
+    if cached_url and safe_id != song_id:
+        with _cache_lock:
+            _stream_cache[f"{platform}:{safe_id}"] = cached_url
 
     _player_state["seq"] = int(time.time() * 1000) % 2000000000
     _player_state["state"] = "playing"
@@ -1377,19 +1408,10 @@ def player_play():
 
     # Kích hoạt phân giải URL ngầm ngay lập tức (KHÔNG BLOCK MÀN HÌNH VÀ LOA)
     def _bg_resolve():
-        with _cache_lock:
-            cached = _stream_cache.get(f"{platform}:{song_id}") or _stream_cache.get(f"{platform}:{safe_id}")
-        if not cached:
-            p = PLATFORMS.get(platform)
-            if p and hasattr(p, "get_stream_url"):
-                try:
-                    u = p.get_stream_url(song_id)
-                    if u:
-                        with _cache_lock:
-                            _stream_cache[f"{platform}:{song_id}"] = u
-                            _stream_cache[f"{platform}:{safe_id}"] = u
-                except Exception as ex:
-                    print(f"[PlayerHub-BG] Resolve URL error: {ex}")
+        u = _resolve_url_sync(platform, song_id)
+        if u and safe_id != song_id:
+            with _cache_lock:
+                _stream_cache[f"{platform}:{safe_id}"] = u
     threading.Thread(target=_bg_resolve, daemon=True).start()
 
     return jsonify({"status": "ok", "seq": _player_state["seq"], "song": song_info})

@@ -34,9 +34,6 @@ _CID_FILE = Path(__file__).parent.parent / "sc_client_id.txt"
 
 _SC_CLIENT_IDS = [
     "39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ",
-    "iZIs9mchVcX5lhVR1hnZWMM9nx44Huao",
-    "b40391d4e08216c0fae3b7b6e9c4d2d4",
-    "2t9loNfh0ekOfbnFeO3wEiHGMIVk302f",
 ]
 
 # Đọc client_id đã lưu từ file nếu có
@@ -71,14 +68,14 @@ def _scrape_fresh_client_id(force: bool = False) -> str:
     }
     try:
         req = urllib.request.Request("https://soundcloud.com", headers=headers)
-        with urllib.request.urlopen(req, timeout=3.5) as res:
+        with urllib.request.urlopen(req, timeout=4.0) as res:
             html = res.read().decode("utf-8", errors="ignore")
         scripts = re.findall(r'<script[^>]+src="([^">]+)"', html)
         js_urls = [s for s in scripts if s.endswith(".js")]
-        for url in list(reversed(js_urls))[:2]:
+        for url in list(reversed(js_urls))[:3]:
             try:
                 req_js = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req_js, timeout=2.5) as js_res:
+                with urllib.request.urlopen(req_js, timeout=3.0) as js_res:
                     js_text = js_res.read().decode("utf-8", errors="ignore")
                 cids = re.findall(r'client_id[:=]["\']([a-zA-Z0-9]{32})["\']', js_text)
                 if not cids:
@@ -102,17 +99,21 @@ def _scrape_fresh_client_id(force: bool = False) -> str:
 def _get_sc_client_id() -> str:
     global _sc_client_id
     if not _sc_client_id:
-        return _SC_CLIENT_IDS[0]
+        return _SC_CLIENT_IDS[0] if _SC_CLIENT_IDS else _scrape_fresh_client_id(force=True)
     return _sc_client_id
 
-def _rotate_sc_client_id():
-    global _sc_client_id, _sc_cid_idx
-    if len(_SC_CLIENT_IDS) > 1:
+def _rotate_sc_client_id(failed_cid: str = None):
+    global _sc_client_id, _sc_cid_idx, _SC_CLIENT_IDS
+    if failed_cid and failed_cid in _SC_CLIENT_IDS:
+        try:
+            _SC_CLIENT_IDS.remove(failed_cid)
+        except ValueError:
+            pass
+    if _SC_CLIENT_IDS:
         _sc_cid_idx = (_sc_cid_idx + 1) % len(_SC_CLIENT_IDS)
         _sc_client_id = _SC_CLIENT_IDS[_sc_cid_idx]
     else:
-        import threading
-        threading.Thread(target=_scrape_fresh_client_id, args=(True,), daemon=True).start()
+        _sc_client_id = _scrape_fresh_client_id(force=True)
     return _sc_client_id
 
 
@@ -289,6 +290,10 @@ class SoundCloudPlatform:
                 if "title" not in t and tid in hydrated_map:
                     t = hydrated_map[tid]
 
+                tr_list = t.get("media", {}).get("transcodings", [])
+                if tr_list:
+                    _sc_track_transcodings[tid] = tr_list
+
                 title = t.get("title") or t.get("permalink") or "SoundCloud Track"
                 user = t.get("user") or {}
                 artist = user.get("username") or "SoundCloud"
@@ -356,6 +361,12 @@ class SoundCloudPlatform:
                     for candidate in candidates:
                         if not candidate or not candidate.get("url"):
                             continue
+                        fmt = candidate.get("format", {})
+                        mime = str(fmt.get("mime_type", "")).lower()
+                        proto = str(fmt.get("protocol", "")).lower()
+                        # Bỏ qua ngay lập tức các format đã bị SoundCloud khai tử trả 404 (audio/mpegurl hoặc hls audio/mpeg)
+                        if "mpegurl" in mime or (proto == "hls" and mime == "audio/mpeg"):
+                            continue
                         try:
                             m_url = candidate["url"] + f"?client_id={cid}"
                             m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
@@ -367,9 +378,19 @@ class SoundCloudPlatform:
                                     return direct
                         except urllib.error.HTTPError as he:
                             if he.code == 404:
-                                # Một số format cũ bị SoundCloud khai tử trả về 404 -> tự động thử format tiếp theo!
                                 continue
+                            if he.code in (401, 403):
+                                _rotate_sc_client_id(cid)
                             raise
+                except urllib.error.HTTPError as he:
+                    trans = None
+                    if he.code in (401, 403):
+                        _rotate_sc_client_id(cid)
+                    if sc_attempt == 0:
+                        print(f"[SoundCloud] Direct API v2 failed with cid={cid} (HTTP {he.code}), rotating/scraping client_id...")
+                        _scrape_fresh_client_id(force=True)
+                    else:
+                        print(f"[SoundCloud] Direct API v2 stream retry failed ({he}), falling back to yt-dlp...")
                 except Exception as ex_v2:
                     trans = None  # Reset để thử lại nếu lỗi
                     if sc_attempt == 0:
