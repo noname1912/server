@@ -5,4 +5,5 @@ audio_cache/
 *.db
 venv/
 *.log
+sc_client_id.txt
 
