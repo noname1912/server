@@ -4,12 +4,14 @@ Hỗ trợ: ZingMP3 | SoundCloud | YouTube
 """
 
 import os
+import re
 import time
 import json
 import struct
 import socket
 import threading
 import urllib.request
+import urllib.parse
 from io import BytesIO
 from pathlib import Path
 import subprocess
