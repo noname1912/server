@@ -25,8 +25,13 @@ _YDL_STREAM_OPTS = {
     "no_warnings":    True,
     "format":         "ba/b",
     "noplaylist":     True,
-    "socket_timeout": 5,
-    "retries":        2,
+    "socket_timeout": 8,
+    "retries":        3,
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["android", "ios"]
+        }
+    },
 }
 
 
