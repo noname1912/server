@@ -352,17 +352,24 @@ class SoundCloudPlatform:
                         if trans:
                             _sc_track_transcodings[str(numeric_id)] = trans
                     progs = [x for x in trans if x.get("format", {}).get("protocol") == "progressive"]
-                    hls_mp3 = [x for x in trans if x.get("format", {}).get("protocol") == "hls" and ("mpeg" in str(x.get("format", {}).get("mime_type", "")) or "mp3" in str(x.get("format", {}).get("mime_type", "")))]
-                    target = progs[0] if progs else (hls_mp3[0] if hls_mp3 else (trans[0] if trans else None))
-                    if target and target.get("url"):
-                        m_url = target["url"] + f"?client_id={cid}"
-                        m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-                        with urllib.request.urlopen(m_req, timeout=3.5) as m_res:
-                            m_data = json.loads(m_res.read().decode("utf-8"))
-                            direct = m_data.get("url")
-                            if direct:
-                                print(f"[SoundCloud] Direct API v2 stream URL obtained: {direct[:60]}...")
-                                return direct
+                    candidates = progs + [x for x in trans if x not in progs]
+                    for candidate in candidates:
+                        if not candidate or not candidate.get("url"):
+                            continue
+                        try:
+                            m_url = candidate["url"] + f"?client_id={cid}"
+                            m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                            with urllib.request.urlopen(m_req, timeout=3.5) as m_res:
+                                m_data = json.loads(m_res.read().decode("utf-8"))
+                                direct = m_data.get("url")
+                                if direct:
+                                    print(f"[SoundCloud] Direct API v2 stream URL obtained ({candidate.get('format')}): {direct[:60]}...")
+                                    return direct
+                        except urllib.error.HTTPError as he:
+                            if he.code == 404:
+                                # Một số format cũ bị SoundCloud khai tử trả về 404 -> tự động thử format tiếp theo!
+                                continue
+                            raise
                 except Exception as ex_v2:
                     trans = None  # Reset để thử lại nếu lỗi
                     if sc_attempt == 0:
