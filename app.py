@@ -2515,10 +2515,63 @@ def system_update():
         return jsonify({"status": "error", "error": str(e)}), 500
 
 
+@app.route("/api/debug/test_fmp4")
+def debug_test_fmp4():
+    song_id = request.args.get("id", "1565599693")
+    p = PLATFORMS["soundcloud"]
+    t0 = time.time()
+    audio_url = p.get_stream_url(song_id)
+    t_url = time.time() - t0
+
+    steps = [f"URL resolved in {t_url:.3f}s: {audio_url}"]
+
+    t_m3u8 = time.time()
+    req = urllib.request.Request(audio_url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        m3u8_text = r.read().decode("utf-8", errors="ignore")
+    steps.append(f"M3U8 fetched in {time.time()-t_m3u8:.3f}s, length={len(m3u8_text)}")
+
+    init_match = re.search(r'#EXT-X-MAP:URI="([^"]+)"', m3u8_text)
+    if not init_match:
+        return Response("\n".join(steps + ["No EXT-X-MAP"]), mimetype="text/plain")
+
+    raw_init = init_match.group(1)
+    init_url = raw_init if raw_init.startswith("http") else urllib.parse.urljoin(audio_url, raw_init)
+    seg_urls = [line.strip() for line in m3u8_text.splitlines() if line.strip() and not line.startswith("#")]
+    seg_0 = seg_urls[0] if seg_urls[0].startswith("http") else urllib.parse.urljoin(audio_url, seg_urls[0])
+
+    t_dl = time.time()
+    with urllib.request.urlopen(urllib.request.Request(init_url, headers={"User-Agent": "Mozilla/5.0"}), timeout=5) as r:
+        init_bytes = r.read()
+    with urllib.request.urlopen(urllib.request.Request(seg_0, headers={"User-Agent": "Mozilla/5.0"}), timeout=5) as r:
+        seg0_bytes = r.read()
+    steps.append(f"Init ({len(init_bytes)} B) + Seg0 ({len(seg0_bytes)} B) downloaded in {time.time()-t_dl:.3f}s")
+
+    ff_cmd = [
+        "ffmpeg", "-y", "-loglevel", "debug",
+        "-i", "pipe:0",
+        "-vn", "-acodec", "libmp3lame", "-b:a", "128k", "-ar", "44100", "-ac", "2",
+        "-f", "mp3", "-write_xing", "0", "pipe:1"
+    ]
+    t_ff = time.time()
+    proc = subprocess.Popen(ff_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        stdout_data, stderr_data = proc.communicate(input=init_bytes + seg0_bytes, timeout=5.0)
+        steps.append(f"FFmpeg communicate succeeded in {time.time()-t_ff:.3f}s: produced {len(stdout_data)} bytes of MP3!")
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout_data, stderr_data = proc.communicate()
+        steps.append(f"FFmpeg communicate TIMED OUT after 5s! Stderr:\n{stderr_data.decode(errors='ignore')[-1000:]}")
+    except Exception as ex:
+        steps.append(f"FFmpeg exception: {ex}")
+
+    return Response("\n".join(steps), mimetype="text/plain; charset=utf-8")
+
+
 @app.route("/api/debug/journal")
 def debug_journal():
     try:
-        out = subprocess.check_output(["journalctl", "-u", "esp32-player.service", "-n", "80", "--no-pager"], timeout=3.0)
+        out = subprocess.check_output(["journalctl", "-u", "esp32-player.service", "-n", "200", "--no-pager"], timeout=3.0)
         return Response(out, mimetype="text/plain; charset=utf-8")
     except Exception as e:
         return str(e), 500
