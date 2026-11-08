@@ -884,41 +884,68 @@ def stream_audio(platform: str, song_id: str):
         return send_file(str(final_mp3), mimetype="audio/mpeg", conditional=True)
 
     # 2. NẾU CHƯA CÓ TRONG CACHE:
-    # Lấy stream URL gốc (đồng bộ hóa chống gọi trùng lặp giữa background resolve và stream request)
+    # TRẢ VỀ RESPONSE NGAY LẬP TỨC (<1ms)!
+    # Trong generator, nhả ngay 4 frame MP3 sync frames (128kbps, 44.1kHz, Stereo silence ~0.1s)
+    # ở DÒNG ĐẦU TIÊN để Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa cùng lúc với connecttohost (<10ms)!
     cache_key = f"{platform}:{song_id}"
-    audio_url = _resolve_url_sync(platform, song_id)
-    if not audio_url:
-        abort(404, "Cannot get stream URL")
-
     import shutil
     has_ffmpeg = bool(shutil.which("ffmpeg"))
-    is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower()) or ("playlist" in audio_url.lower())
 
-    # MP3 trực tiếp: SoundCloud progressive, Zing MP3, hoặc bất kỳ stream MP3 gốc nào
-    # Phát trực tiếp bằng Direct Proxy (0ms delay, không qua FFmpeg để tránh nghẽn pipe / Cloudflare CDN stall)
-    is_direct_mp3 = (platform in ("soundcloud", "zing") and not is_m3u8) or (".mp3" in audio_url.lower() and not is_m3u8)
+    def generate_audio_stream():
+        # DÒNG ĐẦU TIÊN CỰC KỲ QUAN TRỌNG:
+        # Nhả ngay 4 frame MP3 sync silence frames (128kbps, 44.1kHz, Stereo silence ~0.1s)
+        # Giúp Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa trong <1ms cùng lúc với connecttohost!
+        mp3_silence_frame = bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413) # 417 bytes / frame (~26.1ms)
+        yield mp3_silence_frame * 4
 
-    if is_direct_mp3 or not has_ffmpeg:
-        if is_m3u8 and not has_ffmpeg:
-            print(f"[Stream-Error] URL is HLS/m3u8 but FFmpeg is not installed on server: {audio_url[:60]}")
-            abort(500, "Server missing FFmpeg for HLS transcoding")
-
-        print(f"[Stream-Direct] Fast direct MP3 stream for {cache_key}")
-        def generate_direct():
-            # Nhả ngay 4 frame MP3 sync frames (128kbps, 44.1kHz, Stereo silence ~0.1s)
-            # Giúp Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa trong <1ms cùng lúc với connecttohost!
-            mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
-            yield mp3_burst
-
-            f_cache = None
+        # Nếu trong lúc đó file cache hoàn chỉnh vừa được tạo bởi luồng khác:
+        if final_mp3.exists() and final_mp3.stat().st_size > 20000:
             try:
-                if tmp_mp3.exists():
-                    try: tmp_mp3.unlink()
-                    except Exception: pass
-                f_cache = open(tmp_mp3, "wb")
+                with open(final_mp3, "rb") as f_cached:
+                    while True:
+                        buf = f_cached.read(8192)
+                        if not buf:
+                            break
+                        yield buf
+                return
             except Exception:
                 pass
 
+        # Lấy stream URL gốc (đồng bộ hóa chống gọi trùng lặp giữa background worker và stream request)
+        # Trong khi chờ resolve URL (nếu chưa có trong cache), nhả thêm silence frames mỗi 40ms để giữ ấm buffer ESP32 và socket
+        audio_url = None
+        for _ in range(40): # Tối đa 2.0s
+            with _cache_lock:
+                if cache_key in _stream_cache:
+                    audio_url = _stream_cache[cache_key]
+                    break
+            audio_url = _resolve_url_sync(platform, song_id, timeout=0.05)
+            if audio_url:
+                break
+            yield mp3_silence_frame * 2
+            time.sleep(0.04)
+
+        if not audio_url:
+            audio_url = _resolve_url_sync(platform, song_id, timeout=8.0)
+
+        if not audio_url:
+            print(f"[Stream] Cannot get stream URL for {cache_key}")
+            return
+
+        is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower()) or ("playlist" in audio_url.lower())
+        is_direct_mp3 = (platform in ("soundcloud", "zing") and not is_m3u8) or (".mp3" in audio_url.lower() and not is_m3u8)
+
+        f_cache = None
+        try:
+            if tmp_mp3.exists():
+                try: tmp_mp3.unlink()
+                except Exception: pass
+            f_cache = open(tmp_mp3, "wb")
+        except Exception:
+            pass
+
+        # --- A. PHÁT TRỰC TIẾP MP3 (Zing / SoundCloud progressive) ---
+        if is_direct_mp3 or not has_ffmpeg:
             try:
                 req = urllib.request.Request(
                     audio_url,
@@ -928,12 +955,8 @@ def stream_audio(platform: str, song_id: str):
                     }
                 )
                 with urllib.request.urlopen(req, timeout=15) as src_resp:
-                    first_chunk = True
                     while True:
-                        # Chunk đầu tiên 2048 bytes để Werkzeug gửi ngay lập tức HTTP 200 OK cho ESP32 Loa (<50ms)
-                        chunk_size = 2048 if first_chunk else 8192
-                        buf = src_resp.read(chunk_size)
-                        first_chunk = False
+                        buf = src_resp.read(8192)
                         if not buf:
                             break
                         if f_cache:
@@ -957,40 +980,10 @@ def stream_audio(platform: str, song_id: str):
                 if f_cache and not f_cache.closed:
                     try: f_cache.close()
                     except Exception: pass
+            return
 
-        content_type = "audio/mpeg" if (is_direct_mp3 or platform in ("soundcloud", "zing")) else "audio/mp4"
-        return Response(
-            stream_with_context(generate_direct()),
-            status=200,
-            headers={
-                "Content-Type": content_type,
-                "Cache-Control": "no-cache",
-                "Accept-Ranges": "none",
-                "Access-Control-Allow-Origin": "*",
-            },
-            direct_passthrough=True,
-        )
-
-    # 2.5. XỬ LÝ SIÊU TỐC CHO HLS fMP4 (SoundCloud HLS):
-    # FFmpeg demuxer HLS thông thường bị nghẽn 35-45s do tải tuần tự các segment để tính duration.
-    # Động cơ fMP4 trả về Response ngay lập tức (<1ms), nhả MP3 silence burst để Werkzeug gửi ngay HTTP 200 OK
-    # cùng lúc với connecttohost, sau đó tải init.mp4 + seg0 để FFmpeg transcode MP3 liên tục không trễ.
-    if is_m3u8 and has_ffmpeg:
-        def generate_fmp4():
-            # 1. Nhả ngay 4 frame MP3 sync frames (128kbps, 44.1kHz, Stereo silence ~0.1s)
-            # Giúp Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa trong <1ms cùng lúc với connecttohost!
-            mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
-            yield mp3_burst
-
-            f_cache = None
-            try:
-                if tmp_mp3.exists():
-                    try: tmp_mp3.unlink()
-                    except Exception: pass
-                f_cache = open(tmp_mp3, "wb")
-            except Exception:
-                pass
-
+        # --- B. ĐỘNG CƠ HLS fMP4 SIÊU TỐC (<0.2s) CHO SOUNDCLOUD & YOUTUBE ---
+        if is_m3u8 and has_ffmpeg:
             proc = None
             stop_event = threading.Event()
             try:
@@ -1115,7 +1108,7 @@ def stream_audio(platform: str, song_id: str):
                         yield chunk
 
                 else:
-                    # Fallback cho HLS dạng MPEG-TS trực tiếp
+                    # Fallback MPEG-TS HLS
                     cmd_ts = [
                         "ffmpeg", "-nostdin", "-y", "-threads", "2", "-loglevel", "error",
                         "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp,subfile,httpproxy",
@@ -1124,20 +1117,14 @@ def stream_audio(platform: str, song_id: str):
                         "-b:a", "128k", "-ar", "44100", "-ac", "2", "-f", "mp3", "-write_xing", "0", "pipe:1"
                     ]
                     proc = subprocess.Popen(cmd_ts, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, bufsize=65536)
-                    first_chunk = proc.stdout.read(2048)
-                    if first_chunk:
+                    while True:
+                        chunk = proc.stdout.read(8192)
+                        if not chunk:
+                            break
                         if f_cache:
-                            try: f_cache.write(first_chunk)
+                            try: f_cache.write(chunk)
                             except Exception: pass
-                        yield first_chunk
-                        while True:
-                            chunk = proc.stdout.read(8192)
-                            if not chunk:
-                                break
-                            if f_cache:
-                                try: f_cache.write(chunk)
-                                except Exception: pass
-                            yield chunk
+                        yield chunk
 
                 if f_cache:
                     f_cache.close()
@@ -1159,116 +1146,39 @@ def stream_audio(platform: str, song_id: str):
                     except Exception: pass
                 if proc:
                     try:
-                        if proc.stdin and not proc.stdin.closed:
-                            proc.stdin.close()
+                        if proc.stdin and not proc.stdin.closed: proc.stdin.close()
                     except Exception: pass
                     try:
-                        if proc.stdout and not proc.stdout.closed:
-                            proc.stdout.close()
+                        if proc.stdout and not proc.stdout.closed: proc.stdout.close()
                     except Exception: pass
                     if proc.poll() is None:
                         try:
                             proc.terminate()
                             proc.kill()
                         except Exception: pass
+            return
 
-        return Response(
-            stream_with_context(generate_fmp4()),
-            status=200,
-            headers={
-                "Content-Type": "audio/mpeg",
-                "Cache-Control": "no-cache",
-                "Accept-Ranges": "none",
-                "Access-Control-Allow-Origin": "*",
-            },
-            direct_passthrough=True,
-        )
-
-    # 3. Phát qua FFmpeg Pipe cho YouTube hoặc HLS stream (.m3u8)
-    ref = _get_referer(platform)
-
-    cmd = [
-        "ffmpeg",
-        "-nostdin",
-        "-y",
-        "-threads", "2",
-        "-loglevel", "error",
-        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    ]
-    if ref:
-        cmd.extend(["-referer", ref])
-    if is_m3u8:
-        # Bắt buộc phải có hls,data,applehttp để giải mã HLS m3u8 playlist không bị lỗi
-        # probesize=32768 & analyzeduration=0 giúp FFmpeg bỏ qua phân tích tải trước 10 segments (giảm từ 45s xuống <0.3s)
+        # --- C. FALLBACK PIPE CHO YOUTUBE ---
+        ref = _get_referer(platform)
+        cmd = [
+            "ffmpeg", "-nostdin", "-y", "-threads", "2", "-loglevel", "error",
+            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        ]
+        if ref: cmd.extend(["-referer", ref])
         cmd.extend([
-            "-protocol_whitelist", "file,http,https,tcp,tls,crypto,hls,data,applehttp,subfile,httpproxy",
-            "-probesize", "32768",
-            "-analyzeduration", "0",
-            "-fflags", "+nobuffer",
-            "-flags", "low_delay",
+            "-probesize", "32768", "-analyzeduration", "0", "-fflags", "+nobuffer", "-flags", "low_delay",
+            "-i", audio_url, "-vn", "-af", "volume=0.85", "-acodec", "libmp3lame",
+            "-b:a", "128k", "-ar", "44100", "-ac", "2", "-f", "mp3", "-write_xing", "0", "pipe:1"
         ])
-    else:
-        cmd.extend([
-            "-probesize", "32768",
-            "-analyzeduration", "0",
-        ])
-    cmd.extend([
-        "-i", audio_url,
-        "-vn",
-        "-af", "volume=0.85",
-        "-acodec", "libmp3lame",
-        "-b:a", "128k",
-        "-ar", "44100",
-        "-ac", "2",
-        "-f", "mp3",
-        "-write_xing", "0",
-        "pipe:1"
-    ])
-
-    def generate_pipe():
-        # Nhả ngay 4 frame MP3 sync frames (128kbps, 44.1kHz, Stereo silence ~0.1s)
-        # Giúp Werkzeug gửi ngay HTTP/1.1 200 OK cho ESP32 Loa trong <1ms cùng lúc với connecttohost!
-        mp3_burst = (bytes([0xFF, 0xFB, 0x90, 0x64]) + bytes(413)) * 4
-        yield mp3_burst
-
-        f_cache = None
+        proc_pipe = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, bufsize=65536)
         try:
-            if tmp_mp3.exists():
-                try: tmp_mp3.unlink()
-                except Exception: pass
-            f_cache = open(tmp_mp3, "wb")
-        except Exception:
-            pass
-
-        proc = None
-        try:
-            # bufsize=65536 để FFmpeg giải mã mượt mà không bị nghẽn buffer trên HLS segments
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, bufsize=65536)
-            print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
-            # Chunk đầu tiên 2048 bytes để Werkzeug gửi ngay HTTP 200 OK cho ESP32 Loa trong <100ms
-            first_chunk = proc.stdout.read(2048)
-            if not first_chunk:
-                err = proc.stderr.read().decode(errors="ignore") if proc.stderr else ""
-                print(f"[Stream-Pipe] FFmpeg failed on start (exit code {proc.poll()}): {err}")
-                return
-
-            if f_cache:
-                try: f_cache.write(first_chunk)
-                except Exception: pass
-            yield first_chunk
-
             while True:
-                chunk = proc.stdout.read(8192)
-                if not chunk:
-                    if proc.poll() is not None and proc.returncode != 0:
-                        err = proc.stderr.read().decode(errors="ignore")
-                        print(f"[Stream-Pipe] FFmpeg failed with code {proc.returncode}: {err[:200]}")
-                    break
+                chunk = proc_pipe.stdout.read(8192)
+                if not chunk: break
                 if f_cache:
                     try: f_cache.write(chunk)
                     except Exception: pass
                 yield chunk
-
             if f_cache:
                 f_cache.close()
                 f_cache = None
@@ -1277,25 +1187,26 @@ def stream_audio(platform: str, song_id: str):
                         try: final_mp3.unlink()
                         except Exception: pass
                     tmp_mp3.rename(final_mp3)
-                    print(f"[Stream-Cache] Cache complete: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
+                    print(f"[Stream-Cache] Pipe complete cache: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
                     _cleanup_old_cache(60)
-        except Exception as e:
-            print(f"[Stream-Pipe] Error: {e}")
+        except Exception as ex_p:
+            print(f"[Stream-Pipe] Error: {ex_p}")
         finally:
             if f_cache and not f_cache.closed:
                 try: f_cache.close()
                 except Exception: pass
-            if proc:
-                try: proc.stdout.close()
+            if proc_pipe:
+                try:
+                    if proc_pipe.stdout and not proc_pipe.stdout.closed: proc_pipe.stdout.close()
                 except Exception: pass
-                if proc.poll() is None:
+                if proc_pipe.poll() is None:
                     try:
-                        proc.terminate()
-                        proc.kill()
+                        proc_pipe.terminate()
+                        proc_pipe.kill()
                     except Exception: pass
 
     return Response(
-        stream_with_context(generate_pipe()),
+        stream_with_context(generate_audio_stream()),
         status=200,
         headers={
             "Content-Type": "audio/mpeg",
@@ -1630,9 +1541,12 @@ def _auto_play_next(from_user: bool = False) -> bool:
     else:
         safe_id = song_id
 
-    # Phân giải stream URL trước khi kích hoạt lệnh phát để Loa có stream tức thì (0ms)
-    cached_url = _resolve_url_sync(platform, song_id)
-    if cached_url and safe_id != song_id:
+    # Kích hoạt nạp stream URL ngầm (không chặn luồng chuyển bài tự động)
+    with _cache_lock:
+        cached_url = _stream_cache.get(f"{platform}:{song_id}")
+    if not cached_url:
+        threading.Thread(target=_resolve_url_sync, args=(platform, song_id), daemon=True).start()
+    elif safe_id != song_id:
         with _cache_lock:
             _stream_cache[f"{platform}:{safe_id}"] = cached_url
 
@@ -1688,9 +1602,12 @@ def player_play():
         "duration": int(data.get("duration", 0)),
     }
 
-    # 1. Phân giải stream URL trước khi đổi seq để khi Loa connecttohost là CÓ LUỒNG NGAY LẬP TỨC (<0.1s)
-    cached_url = _resolve_url_sync(platform, song_id)
-    if cached_url and safe_id != song_id:
+    # Kích hoạt phân giải URL ngầm ngay lập tức (không chặn phản hồi của nút bấm Play)
+    with _cache_lock:
+        cached_url = _stream_cache.get(f"{platform}:{song_id}")
+    if not cached_url:
+        threading.Thread(target=_resolve_url_sync, args=(platform, song_id), daemon=True).start()
+    elif safe_id != song_id:
         with _cache_lock:
             _stream_cache[f"{platform}:{safe_id}"] = cached_url
 

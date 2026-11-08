@@ -351,13 +351,21 @@ class SoundCloudPlatform:
                     if not trans:
                         t_url = f"https://api-v2.soundcloud.com/tracks/{numeric_id}?client_id={cid}"
                         t_req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-                        with urllib.request.urlopen(t_req, timeout=3.5) as t_res:
+                        with urllib.request.urlopen(t_req, timeout=5.0) as t_res:
                             t_data = json.loads(t_res.read().decode("utf-8"))
                         trans = t_data.get("media", {}).get("transcodings", [])
                         if trans:
                             _sc_track_transcodings[str(numeric_id)] = trans
+
+                    # Ưu tiên thứ tự định dạng tốt nhất:
+                    # 1. Progressive (MP3 phát trực tiếp 0ms không cần transcode)
+                    # 2. HLS fMP4 (audio/mp4 - định dạng chính thức, FFmpeg transcode siêu tốc 0.1s)
+                    # 3. Các định dạng HLS khác (opus, ogg)
                     progs = [x for x in trans if x.get("format", {}).get("protocol") == "progressive"]
-                    candidates = progs + [x for x in trans if x not in progs]
+                    fmp4s = [x for x in trans if x.get("format", {}).get("protocol") == "hls" and "mp4" in str(x.get("format", {}).get("mime_type", "")).lower()]
+                    others = [x for x in trans if x not in progs and x not in fmp4s]
+                    candidates = progs + fmp4s + others
+
                     for candidate in candidates:
                         if not candidate or not candidate.get("url"):
                             continue
@@ -370,7 +378,7 @@ class SoundCloudPlatform:
                         try:
                             m_url = candidate["url"] + f"?client_id={cid}"
                             m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-                            with urllib.request.urlopen(m_req, timeout=3.5) as m_res:
+                            with urllib.request.urlopen(m_req, timeout=5.0) as m_res:
                                 m_data = json.loads(m_res.read().decode("utf-8"))
                                 direct = m_data.get("url")
                                 if direct:
@@ -386,18 +394,14 @@ class SoundCloudPlatform:
                     trans = None
                     if he.code in (401, 403):
                         _rotate_sc_client_id(cid)
-                    if sc_attempt == 0:
-                        print(f"[SoundCloud] Direct API v2 failed with cid={cid} (HTTP {he.code}), rotating/scraping client_id...")
-                        _scrape_fresh_client_id(force=True)
+                        if sc_attempt == 0:
+                            print(f"[SoundCloud] Direct API v2 unauthorized (HTTP {he.code}), rotating/scraping client_id...")
+                            _scrape_fresh_client_id(force=True)
                     else:
-                        print(f"[SoundCloud] Direct API v2 stream retry failed ({he}), falling back to yt-dlp...")
+                        print(f"[SoundCloud] Direct API v2 stream HTTP {he.code}, trying fallback...")
                 except Exception as ex_v2:
-                    trans = None  # Reset để thử lại nếu lỗi
-                    if sc_attempt == 0:
-                        print(f"[SoundCloud] Direct API v2 failed with cid={cid} ({ex_v2}), scraping fresh client_id...")
-                        _scrape_fresh_client_id(force=True)
-                    else:
-                        print(f"[SoundCloud] Direct API v2 stream retry failed ({ex_v2}), falling back to yt-dlp...")
+                    trans = None
+                    print(f"[SoundCloud] Direct API v2 stream exception ({ex_v2}), retrying...")
 
         # 2. Fallback sang yt-dlp nếu không lấy được bằng API v2
         if raw_url:
