@@ -9,6 +9,9 @@ import urllib.request
 import urllib.parse
 import yt_dlp
 
+import os
+from pathlib import Path
+
 _YDL_SEARCH_OPTS = {
     "quiet":          True,
     "no_warnings":    True,
@@ -27,13 +30,35 @@ _YDL_STREAM_OPTS = {
     "socket_timeout": 10,
 }
 
+_CID_FILE = Path(__file__).parent.parent / "sc_client_id.txt"
+
 _SC_CLIENT_IDS = [
     "39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ",
+    "iZIs9mchVcX5lhVR1hnZWMM9nx44Huao",
+    "b40391d4e08216c0fae3b7b6e9c4d2d4",
+    "2t9loNfh0ekOfbnFeO3wEiHGMIVk302f",
 ]
+
+# Đọc client_id đã lưu từ file nếu có
+if _CID_FILE.exists():
+    try:
+        saved_cid = _CID_FILE.read_text(encoding="utf-8").strip()
+        if len(saved_cid) == 32 and saved_cid not in _SC_CLIENT_IDS:
+            _SC_CLIENT_IDS.insert(0, saved_cid)
+    except Exception:
+        pass
+
 _sc_cid_idx = 0
 _sc_client_id = _SC_CLIENT_IDS[0]
 _last_scrape_time = 0
 _sc_cache = {}  # query: (timestamp, results)
+_sc_track_transcodings = {}  # tid: transcodings list
+
+def _save_client_id_to_file(cid: str):
+    try:
+        _CID_FILE.write_text(cid, encoding="utf-8")
+    except Exception:
+        pass
 
 def _scrape_fresh_client_id(force: bool = False) -> str:
     global _sc_client_id, _last_scrape_time, _SC_CLIENT_IDS
@@ -64,6 +89,7 @@ def _scrape_fresh_client_id(force: bool = False) -> str:
                     fresh_cid = cids[0]
                     print(f"[SoundCloud] Auto-scraped fresh client_id: {fresh_cid}")
                     _sc_client_id = fresh_cid
+                    _save_client_id_to_file(fresh_cid)
                     if fresh_cid not in _SC_CLIENT_IDS:
                         _SC_CLIENT_IDS.insert(0, fresh_cid)
                     return fresh_cid
@@ -124,6 +150,10 @@ class SoundCloudPlatform:
                     tid = str(t.get("id", ""))
                     if not tid:
                         continue
+                    # Cache transcodings để lấy stream URL tức thì (<150ms) không cần gọi tracks/{id}
+                    tr_list = t.get("media", {}).get("transcodings", [])
+                    if tr_list:
+                        _sc_track_transcodings[tid] = tr_list
                     title = t.get("title") or t.get("permalink") or "SoundCloud Track"
                     user = t.get("user") or {}
                     artist = user.get("username") or "SoundCloud"
@@ -309,19 +339,23 @@ class SoundCloudPlatform:
                 numeric_id = m.group(1)
 
         if numeric_id:
+            trans = _sc_track_transcodings.get(str(numeric_id))
             for sc_attempt in range(2):
                 try:
                     cid = _get_sc_client_id()
-                    t_url = f"https://api-v2.soundcloud.com/tracks/{numeric_id}?client_id={cid}"
-                    t_req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
-                    with urllib.request.urlopen(t_req, timeout=3.5) as t_res:
-                        t_data = json.loads(t_res.read().decode("utf-8"))
-                    trans = t_data.get("media", {}).get("transcodings", [])
+                    if not trans:
+                        t_url = f"https://api-v2.soundcloud.com/tracks/{numeric_id}?client_id={cid}"
+                        t_req = urllib.request.Request(t_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+                        with urllib.request.urlopen(t_req, timeout=3.5) as t_res:
+                            t_data = json.loads(t_res.read().decode("utf-8"))
+                        trans = t_data.get("media", {}).get("transcodings", [])
+                        if trans:
+                            _sc_track_transcodings[str(numeric_id)] = trans
                     progs = [x for x in trans if x.get("format", {}).get("protocol") == "progressive"]
                     target = progs[0] if progs else (trans[0] if trans else None)
                     if target and target.get("url"):
                         m_url = target["url"] + f"?client_id={cid}"
-                        m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                        m_req = urllib.request.Request(m_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
                         with urllib.request.urlopen(m_req, timeout=3.5) as m_res:
                             m_data = json.loads(m_res.read().decode("utf-8"))
                             direct = m_data.get("url")
@@ -329,6 +363,7 @@ class SoundCloudPlatform:
                                 print(f"[SoundCloud] Direct API v2 stream URL obtained: {direct[:60]}...")
                                 return direct
                 except Exception as ex_v2:
+                    trans = None  # Reset để thử lại nếu lỗi
                     if sc_attempt == 0:
                         print(f"[SoundCloud] Direct API v2 failed with cid={cid} ({ex_v2}), scraping fresh client_id...")
                         _scrape_fresh_client_id(force=True)

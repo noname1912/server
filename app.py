@@ -778,28 +778,66 @@ def stream_audio(platform: str, song_id: str):
     has_ffmpeg = bool(shutil.which("ffmpeg"))
     is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower())
 
-    # Nếu không có FFmpeg trên server:
-    if not has_ffmpeg:
-        if is_m3u8:
+    # MP3 trực tiếp: SoundCloud progressive, Zing MP3, hoặc bất kỳ stream MP3 gốc nào
+    # Phát trực tiếp bằng Direct Proxy (0ms delay, không qua FFmpeg để tránh nghẽn pipe / Cloudflare CDN stall)
+    is_direct_mp3 = (platform in ("soundcloud", "zing") and not is_m3u8) or (".mp3" in audio_url.lower() and not is_m3u8)
+
+    if is_direct_mp3 or not has_ffmpeg:
+        if is_m3u8 and not has_ffmpeg:
             print(f"[Stream-Error] URL is HLS/m3u8 but FFmpeg is not installed on server: {audio_url[:60]}")
             abort(500, "Server missing FFmpeg for HLS transcoding")
-        print(f"[Stream] Direct Proxy (no-ffmpeg) for {platform}:{song_id}")
-        def generate_direct():
-            req = urllib.request.Request(
-                audio_url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                    "Referer": _get_referer(platform),
-                }
-            )
-            with urllib.request.urlopen(req, timeout=12) as src_resp:
-                while True:
-                    buf = src_resp.read(16384)
-                    if not buf:
-                        break
-                    yield buf
 
-        content_type = "audio/mpeg" if platform == "soundcloud" else "audio/mp4"
+        print(f"[Stream-Direct] Fast direct MP3 stream for {cache_key}")
+        def generate_direct():
+            f_cache = None
+            try:
+                if tmp_mp3.exists():
+                    try: tmp_mp3.unlink()
+                    except Exception: pass
+                f_cache = open(tmp_mp3, "wb")
+            except Exception:
+                pass
+
+            try:
+                req = urllib.request.Request(
+                    audio_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                        "Referer": _get_referer(platform),
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=15) as src_resp:
+                    first_chunk = True
+                    while True:
+                        # Chunk đầu tiên 2048 bytes để Werkzeug gửi ngay lập tức HTTP 200 OK cho ESP32 Loa (<50ms)
+                        chunk_size = 2048 if first_chunk else 8192
+                        buf = src_resp.read(chunk_size)
+                        first_chunk = False
+                        if not buf:
+                            break
+                        if f_cache:
+                            try: f_cache.write(buf)
+                            except Exception: pass
+                        yield buf
+
+                if f_cache:
+                    f_cache.close()
+                    f_cache = None
+                    if tmp_mp3.exists() and tmp_mp3.stat().st_size > 20000:
+                        if final_mp3.exists():
+                            try: final_mp3.unlink()
+                            except Exception: pass
+                        tmp_mp3.rename(final_mp3)
+                        print(f"[Stream-Cache] Direct cache complete: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
+                        _cleanup_old_cache(60)
+            except Exception as e:
+                print(f"[Stream-Direct] Error: {e}")
+            finally:
+                if f_cache and not f_cache.closed:
+                    try: f_cache.close()
+                    except Exception: pass
+
+        content_type = "audio/mpeg" if (is_direct_mp3 or platform in ("soundcloud", "zing")) else "audio/mp4"
         return Response(
             stream_with_context(generate_direct()),
             status=200,
@@ -812,7 +850,7 @@ def stream_audio(platform: str, song_id: str):
             direct_passthrough=True,
         )
 
-    # 3. Phát trực tiếp qua FFmpeg Pipe: Sub-50ms latency, 0% CPU spike, tự động đệm vào SSD cache
+    # 3. Phát qua FFmpeg Pipe cho YouTube hoặc HLS stream (.m3u8)
     ref = _get_referer(platform)
 
     cmd = [
@@ -821,18 +859,12 @@ def stream_audio(platform: str, song_id: str):
         "-y",
         "-loglevel", "error",
         "-probesize", "32768",
-        "-analyzeduration", "200000",
+        "-analyzeduration", "100000",
         "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     ]
     if ref:
         cmd.extend(["-referer", ref])
-    if not is_m3u8:
-        cmd.extend([
-            "-reconnect", "1",
-            "-reconnect_streamed", "1",
-            "-reconnect_delay_max", "5",
-        ])
-    else:
+    if is_m3u8:
         cmd.extend([
             "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
         ])
@@ -846,8 +878,8 @@ def stream_audio(platform: str, song_id: str):
         "-ac", "2",
         "-f", "mp3",
         "-write_xing", "0",
+        "-fflags", "+nobuffer+flush_packets",
         "-flush_packets", "1",
-        "-muxdelay", "0",
         "pipe:1"
     ])
 
@@ -863,10 +895,15 @@ def stream_audio(platform: str, song_id: str):
 
         proc = None
         try:
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, bufsize=32768)
+            # bufsize=0: unbuffered binary pipe để chunk đầu tiên có ngay lập tức (<50ms)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, bufsize=0)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
+            first_chunk = True
             while True:
-                chunk = proc.stdout.read(4096)
+                # Chunk đầu tiên 1024 bytes để đẩy nhanh HTTP 200 OK về cho ESP32
+                chunk_size = 1024 if first_chunk else 4096
+                chunk = proc.stdout.read(chunk_size)
+                first_chunk = False
                 if not chunk:
                     break
                 if f_cache:
