@@ -4,7 +4,6 @@ Hỗ trợ: ZingMP3 | SoundCloud | YouTube
 """
 
 import os
-import sys
 import time
 import json
 import struct
@@ -14,12 +13,6 @@ from io import BytesIO
 from pathlib import Path
 import subprocess
 from urllib.parse import unquote
-
-# Tự động xuất log lập tức vào server.log không bị đệm
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(line_buffering=True)
-if hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(line_buffering=True)
 
 from flask import (Flask, jsonify, request, render_template,
                    Response, stream_with_context, abort, send_file)
@@ -51,30 +44,9 @@ app = Flask(__name__)
 CORS(app)
 db.init_db()
 
-# ─── Cache đơn giản cho stream URLs với TTL 10 phút (tránh link CloudFront/YouTube hết hạn) ──
-_stream_cache: dict[str, tuple[str, float]] = {}
+# ─── Cache đơn giản cho stream URLs (tránh gọi API nhiều lần) ──
+_stream_cache: dict[str, str] = {}
 _cache_lock = threading.Lock()
-
-def _get_stream_cache(key: str) -> str | None:
-    with _cache_lock:
-        item = _stream_cache.get(key)
-        if not item:
-            return None
-        url, ts = item
-        if time.time() - ts > 600:  # 10 phút TTL
-            _stream_cache.pop(key, None)
-            return None
-        return url
-
-def _set_stream_cache(key: str, url: str):
-    with _cache_lock:
-        if len(_stream_cache) > 200:
-            _stream_cache.clear()
-        _stream_cache[key] = (url, time.time())
-
-def _del_stream_cache(key: str):
-    with _cache_lock:
-        _stream_cache.pop(key, None)
 
 # ───────────────────────────────────────────────────────────────
 
@@ -485,8 +457,8 @@ def trending():
 @app.route("/api/recommendations")
 def recommendations():
     """
-    GET /api/recommendations?platform=<youtube|zing|soundcloud>&limit=10
-    Đề xuất 10 bài hát CHỈ THUỘC NỀN TẢNG ĐƯỢC CHỌN (Không bao giờ trộn lẫn các nền tảng khác).
+    GET /api/recommendations?platform=<all|youtube|zing|soundcloud>&limit=10
+    Phân tích lịch sử nghe nhạc, bài hát yêu thích và tìm kiếm để đề xuất 10 bài hát phù hợp phong cách.
     """
     platform = request.args.get("platform", "soundcloud").lower()
     if platform not in PLATFORMS:
@@ -494,21 +466,15 @@ def recommendations():
     limit = int(request.args.get("limit", 10))
 
     cache_key = f"rec:{platform}:{limit}"
-    cached = _get_cache(cache_key, 60)
+    cached = _get_cache(cache_key, 120)
     if cached is not None:
         return jsonify(cached)
 
     try:
         from collections import Counter
-        history = db.get_play_history(40)
+        history = db.get_play_history(30)
         favorites = db.get_favorites()
-        searches = db.get_recent_searches(15)
-
-        # Lọc theo nền tảng được chọn để nhận diện gu chuẩn xác nhất
-        plat_history = [s for s in history if s.get("platform") == platform]
-        plat_favs    = [s for s in favorites if s.get("platform") == platform]
-        src_history  = plat_history if len(plat_history) >= 2 else history
-        src_favs     = plat_favs if len(plat_favs) >= 1 else favorites
+        searches = db.get_recent_searches(10)
 
         GENRE_KEYWORDS = [
             "remix", "vinahouse", "lofi", "chill", "acoustic", "ballad",
@@ -519,7 +485,7 @@ def recommendations():
         artist_counts = Counter()
         genre_counts = Counter()
 
-        for s in src_history:
+        for s in history:
             a = (s.get("artist") or "").strip()
             if a and a.lower() not in ("unknown", "nhieu ca si", "nhiều ca sĩ", "various artists", "various"):
                 artist_counts[a] += 1
@@ -528,7 +494,7 @@ def recommendations():
                 if g in t:
                     genre_counts[g] += 1
 
-        for s in src_favs:
+        for s in favorites:
             a = (s.get("artist") or "").strip()
             if a and a.lower() not in ("unknown", "nhieu ca si", "nhiều ca sĩ", "various artists", "various"):
                 artist_counts[a] += 2
@@ -580,52 +546,39 @@ def recommendations():
         collected_songs = []
         seen_ids = set()
         seen_titles = set()
-        artist_tally = Counter()
 
         primary_q = search_queries[0]
-        sec_q = search_queries[1] if len(search_queries) > 1 else (top_genres[0] if top_genres else "Hot V-Pop")
 
-        def _add_song(s, reason):
-            sid = str(s.get("id"))
-            stitle = (s.get("title") or "").strip().lower()
-            sart = (s.get("artist") or "").strip().lower()
-            if not sid or sid in seen_ids: return False
-            if stitle in seen_titles: return False
-            if sart and sart not in ("unknown", "") and artist_tally[sart] >= 2:
-                return False
-            seen_ids.add(sid)
-            seen_titles.add(stitle)
-            if sart: artist_tally[sart] += 1
-            s["platform"] = platform
-            s["rec_reason"] = reason
-            collected_songs.append(s)
-            return True
-
-        # 1. Truy vấn nhanh 1 lần duy nhất theo từ khóa gu chính (~0.3s)
-        try:
-            pri_songs = PLATFORMS[platform].search(primary_q, limit=limit + 5)
-            for s in pri_songs:
-                if len(collected_songs) >= limit: break
-                _add_song(s, f"Theo gu: {primary_q}")
-        except Exception as ex_p:
-            print(f"[Rec] Search primary '{primary_q}' error: {ex_p}")
-
-        # 2. Nếu chưa đủ 10 bài, lấy thêm theo từ khóa gợi ý phụ
-        if len(collected_songs) < limit and sec_q and sec_q != primary_q:
+        def _fetch_plat_songs(p, q, lim):
+            if p not in PLATFORMS: return []
             try:
-                sec_songs = PLATFORMS[platform].search(sec_q, limit=limit - len(collected_songs) + 2)
-                for s in sec_songs:
-                    if len(collected_songs) >= limit: break
-                    _add_song(s, f"Gợi ý: {sec_q}")
-            except Exception: pass
+                res = PLATFORMS[p].search(q, limit=lim)
+                for s in res: s["platform"] = p
+                return res
+            except Exception:
+                return []
 
-        # 3. Dự phòng cuối nếu vẫn chưa đủ 10 bài: lấy từ trending
+        # Luôn luôn lấy duy nhất 100% nền tảng được chọn
+        songs_res = _fetch_plat_songs(platform, primary_q, limit)
+        for s in songs_res:
+            sid = str(s.get("id"))
+            if sid not in seen_ids:
+                seen_ids.add(sid)
+                s["platform"] = platform
+                s["rec_reason"] = f"Theo gu: {primary_q}"
+                collected_songs.append(s)
+
+        # Nếu chưa đủ limit, lấy trending bổ sung từ đúng nền tảng đó
         if len(collected_songs) < limit:
             try:
-                trd_songs = PLATFORMS[platform].get_trending(limit=limit - len(collected_songs))
-                for s in trd_songs:
+                for s in PLATFORMS[platform].get_trending(limit=limit):
                     if len(collected_songs) >= limit: break
-                    _add_song(s, "Thịnh hành")
+                    sid = str(s.get("id"))
+                    if sid not in seen_ids:
+                        seen_ids.add(sid)
+                        s["platform"] = platform
+                        s["rec_reason"] = "Xu hướng"
+                        collected_songs.append(s)
             except Exception: pass
 
         final_songs = collected_songs[:limit]
@@ -638,7 +591,7 @@ def recommendations():
             "songs": final_songs
         }
         _set_cache(cache_key, res_payload)
-        threading.Thread(target=_prewarm_thumbs, args=(final_songs, 32, 5), daemon=True).start()
+        _prewarm_thumbs(final_songs, 32, sync_count=5)
         return jsonify(res_payload)
     except Exception as e:
         print(f"[Recommendations] Error: {e}")
@@ -653,16 +606,9 @@ _transcode_lock = threading.Lock()
 _active_transcodes: dict[str, subprocess.Popen] = {}
 
 def _cleanup_old_cache(max_files: int = 60):
-    """Giữ lại 60 bài hát gần nhất trong cache, tự động xóa bài cũ và bài lỗi < 300KB."""
+    """Giữ lại 60 bài hát gần nhất trong cache, tự động xóa bài cũ."""
     try:
         files = list(AUDIO_CACHE_DIR.glob("*.mp3"))
-        for f in files:
-            try:
-                if f.stat().st_size < 300000:
-                    f.unlink()
-            except Exception:
-                pass
-        files = [f for f in AUDIO_CACHE_DIR.glob("*.mp3") if not f.name.endswith(".tmp.mp3")]
         if len(files) > max_files:
             files.sort(key=lambda f: f.stat().st_mtime)
             for f in files[:-max_files]:
@@ -692,12 +638,8 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
         return  # Không có FFmpeg -> phat stream truc tiep, khong transcode
 
     final_mp3, tmp_mp3 = _get_cache_paths(platform, song_id)
-    if final_mp3.exists():
-        if final_mp3.stat().st_size > 300000:
-            return
-        else:
-            try: final_mp3.unlink()
-            except Exception: pass
+    if final_mp3.exists() and final_mp3.stat().st_size > 20000:
+        return
     cache_key = f"{platform}:{song_id}"
     with _transcode_lock:
         proc = _active_transcodes.get(cache_key)
@@ -716,16 +658,11 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
 
         cmd = [
             "ffmpeg",
-            "-nostdin",
             "-y",
             "-loglevel", "error",
         ]
         # reconnect options chi hop le voi giao thuc HTTP truc tiep, khong ap dung cho HLS demuxer
-        if is_m3u8:
-            cmd.extend([
-                "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
-            ])
-        else:
+        if not is_m3u8:
             cmd.extend([
                 "-reconnect", "1",
                 "-reconnect_streamed", "1",
@@ -736,7 +673,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
             "-thread_queue_size", "4096",
             "-i", audio_url,
             "-vn",
-            "-af", "volume=0.85",
+            "-af", "volume=0.80",
             "-acodec", "libmp3lame",
             "-b:a", "128k",
             "-ar", "44100",
@@ -746,7 +683,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
             str(tmp_mp3)
         ])
         try:
-            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
+            proc = subprocess.Popen(cmd)
             _active_transcodes[cache_key] = proc
             print(f"[Stream-Prewarm] Background transcode started for {cache_key}")
         except Exception as e:
@@ -756,7 +693,7 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
         def _watch_transcode(p=proc, tmp_p=tmp_mp3, final_p=final_mp3, ckey=cache_key):
             try:
                 p.wait()
-                if p.returncode == 0 and tmp_p.exists() and tmp_p.stat().st_size > 300000:
+                if p.returncode == 0 and tmp_p.exists() and tmp_p.stat().st_size > 20000:
                     if final_p.exists():
                         try: final_p.unlink()
                         except Exception: pass
@@ -764,9 +701,6 @@ def _start_transcode_background(platform: str, song_id: str, audio_url: str):
                     print(f"[Stream-Cache] Hoàn tất cache: {final_p.name} ({final_p.stat().st_size // 1024} KB)")
                     _cleanup_old_cache(60)
                 else:
-                    if tmp_p.exists():
-                        try: tmp_p.unlink()
-                        except Exception: pass
                     print(f"[Stream-Cache] Transcode finished/aborted for {ckey}")
             except Exception as ex:
                 print(f"[Stream-Cache] Watch error: {ex}")
@@ -810,59 +744,58 @@ def stream_audio(platform: str, song_id: str):
 
     final_mp3, tmp_mp3 = _get_cache_paths(platform, song_id)
 
-    # 1. NẾU ĐÃ CÓ TRONG CACHE HOÀN CHỈNH (> 300KB) -> PHÁT NGAY LẬP TỨC 100% MƯỢT
-    if final_mp3.exists():
-        if final_mp3.stat().st_size > 300000:
-            print(f"[Stream] Serving cached: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
-            return send_file(str(final_mp3), mimetype="audio/mpeg", conditional=True)
-        else:
-            print(f"[Stream] Xóa file cache hỏng/cụt: {final_mp3.name} ({final_mp3.stat().st_size} bytes)")
-            try: final_mp3.unlink()
-            except Exception: pass
+    # 1. NẾU ĐÃ CÓ TRONG CACHE HOÀN CHỈNH -> PHÁT NGAY LẬP TỨC 100% MƯỢT
+    if final_mp3.exists() and final_mp3.stat().st_size > 20000:
+        print(f"[Stream] Serving cached: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
+        return send_file(str(final_mp3), mimetype="audio/mpeg", conditional=True)
 
     # 2. NẾU CHƯA CÓ TRONG CACHE:
     # Lấy stream URL gốc
     cache_key = f"{platform}:{song_id}"
-    audio_url = _get_stream_cache(cache_key)
+    with _cache_lock:
+        audio_url = _stream_cache.get(cache_key)
 
     if not audio_url:
         print(f"[Stream] Fetching URL for {platform}:{song_id}")
         audio_url = PLATFORMS[platform].get_stream_url(song_id)
         if not audio_url:
             abort(404, "Cannot get stream URL")
-        _set_stream_cache(cache_key, audio_url)
+        with _cache_lock:
+            if len(_stream_cache) > 100:
+                _stream_cache.clear()
+            _stream_cache[cache_key] = audio_url
 
     import shutil
     has_ffmpeg = bool(shutil.which("ffmpeg"))
     is_m3u8 = (".m3u8" in audio_url.lower()) or ("manifest" in audio_url.lower()) or ("/hls" in audio_url.lower())
-    # 3. Phát trực tiếp qua FFmpeg Pipe: Sub-50ms latency, 0% CPU spike, tự động đệm vào SSD cache
+
+    # Nếu không có FFmpeg trên server:
     if not has_ffmpeg:
         if is_m3u8:
+            print(f"[Stream-Error] URL is HLS/m3u8 but FFmpeg is not installed on server: {audio_url[:60]}")
             abort(500, "Server missing FFmpeg for HLS transcoding")
-        print(f"[Stream-Direct] Direct stream (no-ffmpeg) cho {platform}:{song_id}")
-        def generate_direct_stream():
-            try:
-                req = urllib.request.Request(
-                    audio_url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-                        "Referer": _get_referer(platform),
-                    }
-                )
-                with urllib.request.urlopen(req, timeout=12) as src_resp:
-                    while True:
-                        buf = src_resp.read(8192)
-                        if not buf:
-                            break
-                        yield buf
-            except Exception as ex_dir:
-                print(f"[Stream-Direct] Error: {ex_dir}")
+        print(f"[Stream] Direct Proxy (no-ffmpeg) for {platform}:{song_id}")
+        def generate_direct():
+            req = urllib.request.Request(
+                audio_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+                    "Referer": _get_referer(platform),
+                }
+            )
+            with urllib.request.urlopen(req, timeout=12) as src_resp:
+                while True:
+                    buf = src_resp.read(16384)
+                    if not buf:
+                        break
+                    yield buf
 
+        content_type = "audio/mpeg" if platform == "soundcloud" else "audio/mp4"
         return Response(
-            stream_with_context(generate_direct_stream()),
+            stream_with_context(generate_direct()),
             status=200,
             headers={
-                "Content-Type": "audio/mpeg",
+                "Content-Type": content_type,
                 "Cache-Control": "no-cache",
                 "Accept-Ranges": "none",
                 "Access-Control-Allow-Origin": "*",
@@ -870,7 +803,7 @@ def stream_audio(platform: str, song_id: str):
             direct_passthrough=True,
         )
 
-    # FFmpeg Pipe chuẩn mực: 128k MP3 tức thì, không bao giờ lỗi EOF, không nghẽn pipe
+    # 3. Phát trực tiếp qua FFmpeg Pipe: Sub-50ms latency, 0% CPU spike, tự động đệm vào SSD cache
     headers_str = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
     ref = _get_referer(platform)
     if ref:
@@ -898,7 +831,7 @@ def stream_audio(platform: str, song_id: str):
         "-headers", headers_str,
         "-i", audio_url,
         "-vn",
-        "-af", "volume=0.85",
+        "-af", "volume=0.80",
         "-acodec", "libmp3lame",
         "-b:a", "128k",
         "-ar", "44100",
@@ -923,7 +856,7 @@ def stream_audio(platform: str, song_id: str):
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, bufsize=32768)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             while True:
-                chunk = proc.stdout.read(4096)
+                chunk = proc.stdout.read(16384)
                 if not chunk:
                     break
                 if f_cache:
@@ -935,17 +868,13 @@ def stream_audio(platform: str, song_id: str):
             if f_cache:
                 f_cache.close()
                 f_cache = None
-                if proc.returncode == 0 and tmp_mp3.exists() and tmp_mp3.stat().st_size > 300000:
+                if proc.returncode == 0 and tmp_mp3.exists() and tmp_mp3.stat().st_size > 20000:
                     if final_mp3.exists():
                         try: final_mp3.unlink()
                         except Exception: pass
                     tmp_mp3.rename(final_mp3)
                     print(f"[Stream-Cache] Cache complete: {final_mp3.name} ({final_mp3.stat().st_size // 1024} KB)")
                     _cleanup_old_cache(60)
-                else:
-                    if tmp_mp3.exists():
-                        try: tmp_mp3.unlink()
-                        except Exception: pass
         except Exception as e:
             print(f"[Stream-Pipe] Error: {e}")
         finally:
@@ -1061,7 +990,7 @@ def _download_and_cache_thumbnail(url: str, size: int = 32) -> bytes:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Referer": "https://soundcloud.com/",
             "Accept": "image/webp,image/apng,image/*,*/*;q=0.8",
-        }, timeout=3.0, verify=False)
+        }, timeout=3.5, verify=False)
         if r.status_code == 200 and len(r.content) > 100:
             raw = r.content
     except Exception:
@@ -1088,7 +1017,7 @@ def _download_and_cache_thumbnail(url: str, size: int = 32) -> bytes:
     try:
         data = _process_image_to_rgb565(raw, size)
         with _thumb_lock:
-            if len(_thumb_cache) > 1000:
+            if len(_thumb_cache) > 300:
                 _thumb_cache.clear()
             _thumb_cache[cache_key] = data
         return data
@@ -1122,7 +1051,7 @@ def _prewarm_thumbs(song_list, size=32, sync_count=5):
         from concurrent.futures import ThreadPoolExecutor, wait
         with ThreadPoolExecutor(max_workers=min(len(sync_urls), 5)) as pool:
             futures = [pool.submit(_download_and_cache_thumbnail, u, size) for u in sync_urls]
-            wait(futures, timeout=3.0)
+            wait(futures, timeout=1.8)
 
     if rest_urls:
         def _bg_worker():
@@ -1169,7 +1098,7 @@ def thumbnails_batch():
         else:
             missing_indices.append(i)
 
-    # 2. Nếu có ảnh chưa có trong cache, tải SONG SONG đa luồng với timeout tối đa 3.5s
+    # 2. Nếu có ảnh chưa có trong cache, tải SONG SONG đa luồng với timeout tối đa 1.0s
     if missing_indices:
         import concurrent.futures
         def _fetch_one(idx):
@@ -1182,10 +1111,9 @@ def thumbnails_batch():
                 pass
             return idx, None
 
-        ex = concurrent.futures.ThreadPoolExecutor(max_workers=min(len(missing_indices), 6))
-        try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(missing_indices), 6)) as ex:
             futures = [ex.submit(_fetch_one, idx) for idx in missing_indices]
-            done, not_done = concurrent.futures.wait(futures, timeout=3.5)
+            done, not_done = concurrent.futures.wait(futures, timeout=1.0)
             for f in done:
                 try:
                     idx, rgb = f.result()
@@ -1193,8 +1121,6 @@ def thumbnails_batch():
                         results[idx] = rgb
                 except Exception:
                     pass
-        finally:
-            ex.shutdown(wait=False, cancel_futures=True)
 
     # 3. Gom dữ liệu: nếu ảnh nào chưa tải kịp thì dùng fallback tức thì (0.01ms)
     out = bytearray()
@@ -1296,28 +1222,36 @@ def _auto_play_next(from_user: bool = False) -> bool:
     song_id  = str(next_song.get("id", "")).strip()
     if not song_id:
         return False
-
+    _player_state["seq"] = int(time.time() * 1000) % 2000000000
+    _player_state["state"] = "playing"
     if song_id.startswith("http"):
         import base64
         safe_id = "b64_" + base64.urlsafe_b64encode(song_id.encode()).decode().rstrip("=")
     else:
         safe_id = song_id
 
-    # 1. Phân giải stream URL trước khi kích hoạt lệnh phát để Loa có stream tức thì (0ms)
-    cached_url = _get_stream_cache(f"{platform}:{song_id}") or _get_stream_cache(f"{platform}:{safe_id}")
-    if not cached_url:
-        p_obj = PLATFORMS.get(platform)
-        if p_obj and hasattr(p_obj, "get_stream_url"):
-            try:
-                cached_url = p_obj.get_stream_url(song_id)
-                if cached_url:
-                    _set_stream_cache(f"{platform}:{song_id}", cached_url)
-                    _set_stream_cache(f"{platform}:{safe_id}", cached_url)
-            except Exception as ex_u:
-                print(f"[PlayerHub] Auto-next get stream URL error: {ex_u}")
+    # Xóa cache của bài tiếp theo để luôn lấy stream URL tươi mới
+    with _cache_lock:
+        _stream_cache.pop(f"{platform}:{song_id}", None)
+        _stream_cache.pop(f"{platform}:{safe_id}", None)
 
-    _player_state["seq"] = int(time.time() * 1000) % 2000000000
-    _player_state["state"] = "playing"
+    # Pre-warm stream URL của bài tiếp theo
+    def _prewarm_next(plat=platform, sid=song_id, sfid=safe_id):
+        try:
+            p_obj = PLATFORMS.get(plat)
+            if p_obj and hasattr(p_obj, "get_stream_url"):
+                fresh = p_obj.get_stream_url(sid)
+                if fresh:
+                    with _cache_lock:
+                        _stream_cache[f"{plat}:{sid}"] = fresh
+                        _stream_cache[f"{plat}:{sfid}"] = fresh
+                    pass
+                    print(f"[PlayerHub] Pre-warmed next URL for {plat}:{sid}")
+        except Exception as ex_pw:
+            print(f"[PlayerHub] Pre-warm next error: {ex_pw}")
+
+    threading.Thread(target=_prewarm_next, daemon=True).start()
+
     _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
     _player_state["song"] = next_song
     _player_state["elapsed"] = 0
@@ -1368,19 +1302,7 @@ def player_play():
         "duration": int(data.get("duration", 0)),
     }
 
-    # 1. Phân giải stream URL trước khi đổi seq để ESP32 Loa khi kết nối /api/stream là CÓ LUỒNG NGAY LẬP TỨC (< 0.1s)
-    cached_url = _get_stream_cache(f"{platform}:{song_id}") or _get_stream_cache(f"{platform}:{safe_id}")
-    if not cached_url:
-        p_obj = PLATFORMS.get(platform)
-        if p_obj and hasattr(p_obj, "get_stream_url"):
-            try:
-                cached_url = p_obj.get_stream_url(song_id)
-                if cached_url:
-                    _set_stream_cache(f"{platform}:{song_id}", cached_url)
-                    _set_stream_cache(f"{platform}:{safe_id}", cached_url)
-            except Exception as ex_u:
-                print(f"[PlayerHub] Get stream URL error: {ex_u}")
-
+    # Cập nhật trạng thái phát ngay lập tức (0ms) để ESP32 Loa nhận lệnh không bị trễ 10-20s
     with _player_lock:
         global _playlist, _playlist_idx
         for i, s in enumerate(_playlist):
@@ -1396,6 +1318,27 @@ def player_play():
         _player_state["stream_url"] = f"/api/stream/{platform}/{safe_id}?t={_player_state['seq']}"
         _player_state["song"] = song_info
         _player_state["elapsed"] = 0
+
+    # Kích hoạt phân giải stream & transcode ngầm song song (Background) không làm nghẽn phản hồi
+    def _bg_prewarm():
+        try:
+            fresh_url = None
+            with _cache_lock:
+                fresh_url = _stream_cache.get(f"{platform}:{song_id}") or _stream_cache.get(f"{platform}:{safe_id}")
+            if not fresh_url:
+                p_obj = PLATFORMS.get(platform)
+                if p_obj and hasattr(p_obj, "get_stream_url"):
+                    fresh_url = p_obj.get_stream_url(song_id)
+                    if fresh_url:
+                        with _cache_lock:
+                            _stream_cache[f"{platform}:{song_id}"] = fresh_url
+                            _stream_cache[f"{platform}:{safe_id}"] = fresh_url
+            # Luồng phát live stream qua pipe sẽ tự động transcode và đệm SSD khi client bắt đầu kéo nhạc
+            pass
+        except Exception as ex_pw:
+            print(f"[PlayerHub] BG Prewarm error: {ex_pw}")
+
+    threading.Thread(target=_bg_prewarm, daemon=True).start()
 
     try:
         db.add_play_history(song_info)
@@ -2286,72 +2229,7 @@ def get_wallpaper_info():
 
 @app.route("/api/ping")
 def ping():
-    return jsonify({"status": "ok", "version": "3.1-instant-pureplat"})
-
-
-@app.route("/api/cache/clear", methods=["GET", "POST"])
-def cache_clear():
-    """Xóa sạch cache đệm SSD để loại bỏ tất cả các file bài hát bị lỗi/cụt."""
-    deleted = 0
-    try:
-        for f in AUDIO_CACHE_DIR.glob("*.mp3"):
-            try:
-                f.unlink()
-                deleted += 1
-            except Exception:
-                pass
-        _stream_cache.clear()
-        print(f"[Cache] Đã xóa toàn bộ {deleted} file cache cũ.")
-        return jsonify({"status": "ok", "deleted_files": deleted})
-    except Exception as e:
-        return jsonify({"status": "error", "error": str(e)}), 500
-
-
-@app.route("/api/debug/test_ffmpeg/<song_id>")
-def debug_test_ffmpeg(song_id):
-    import time
-    sc = PLATFORMS.get("soundcloud")
-    t0 = time.time()
-    url = sc.get_stream_url(song_id) if sc else None
-    t_fetch = round(time.time() - t0, 2)
-    if not url:
-        return jsonify({"error": "Cannot get stream URL", "fetch_time": t_fetch})
-
-    is_m3u8 = (".m3u8" in url.lower()) or ("manifest" in url.lower()) or ("/hls" in url.lower())
-    headers_str = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\nReferer: https://soundcloud.com/\r\n"
-    cmd = [
-        "ffmpeg", "-nostdin", "-y",
-        "-rw_timeout", "6000000",
-    ]
-    if is_m3u8:
-        cmd.extend(["-protocol_whitelist", "file,http,https,tcp,tls,crypto"])
-    cmd.extend([
-        "-headers", headers_str,
-        "-i", url,
-        "-vn",
-        "-acodec", "libmp3lame",
-        "-b:a", "128k",
-        "-ar", "44100",
-        "-ac", "2",
-        "-f", "mp3",
-        "pipe:1"
-    ])
-    try:
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
-        out, err = p.communicate(timeout=6)
-        return jsonify({
-            "status": "ok",
-            "fetch_time": t_fetch,
-            "url_prefix": url[:80],
-            "chunk_len": len(out),
-            "returncode": p.returncode,
-            "stderr": err.decode("utf-8", errors="ignore")[-800:],
-            "elapsed": round(time.time() - t0, 2)
-        })
-    except Exception as e:
-        if 'p' in locals():
-            p.kill()
-        return jsonify({"error": str(e), "elapsed": round(time.time() - t0, 2)})
+    return jsonify({"status": "ok", "version": "2.2-fast"})
 
 
 @app.route("/api/debug/log")
