@@ -580,85 +580,53 @@ def recommendations():
         collected_songs = []
         seen_ids = set()
         seen_titles = set()
+        artist_tally = Counter()
 
         primary_q = search_queries[0]
         sec_q = search_queries[1] if len(search_queries) > 1 else (top_genres[0] if top_genres else "Hot V-Pop")
 
-        import concurrent.futures
+        def _add_song(s, reason):
+            sid = str(s.get("id"))
+            stitle = (s.get("title") or "").strip().lower()
+            sart = (s.get("artist") or "").strip().lower()
+            if not sid or sid in seen_ids: return False
+            if stitle in seen_titles: return False
+            if sart and sart not in ("unknown", "") and artist_tally[sart] >= 2:
+                return False
+            seen_ids.add(sid)
+            seen_titles.add(stitle)
+            if sart: artist_tally[sart] += 1
+            s["platform"] = platform
+            s["rec_reason"] = reason
+            collected_songs.append(s)
+            return True
 
-        def _fetch_songs(q, lim):
-            try:
-                res = PLATFORMS[platform].search(q, limit=lim)
-                for s in res: s["platform"] = platform
-                return res
-            except Exception:
-                return []
-
-        def _fetch_trend(lim):
-            try:
-                res = PLATFORMS[platform].get_trending(limit=lim)
-                for s in res: s["platform"] = platform
-                return res
-            except Exception:
-                return []
-
-        # Chỉ truy vấn 100% đúng nền tảng đã chọn
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
+        # 1. Truy vấn nhanh 1 lần duy nhất theo từ khóa gu chính (~0.3s)
         try:
-            f_pri = executor.submit(_fetch_songs, primary_q, 8)
-            f_sec = executor.submit(_fetch_songs, sec_q, 8)
-            f_trd = executor.submit(_fetch_trend, 8)
-
-            pri_songs = []
-            sec_songs = []
-            trd_songs = []
-            try: pri_songs = f_pri.result(timeout=2.5) or []
-            except Exception: pass
-            try: sec_songs = f_sec.result(timeout=2.5) or []
-            except Exception: pass
-            try: trd_songs = f_trd.result(timeout=2.5) or []
-            except Exception: pass
-
-            artist_tally = Counter()
-            def _add_song(s, reason):
-                sid = str(s.get("id"))
-                stitle = (s.get("title") or "").strip().lower()
-                sart = (s.get("artist") or "").strip().lower()
-                if not sid or sid in seen_ids: return False
-                if stitle in seen_titles: return False
-                if sart and sart not in ("unknown", "") and artist_tally[sart] >= 2:
-                    return False
-                seen_ids.add(sid)
-                seen_titles.add(stitle)
-                if sart: artist_tally[sart] += 1
-                s["platform"] = platform
-                s["rec_reason"] = reason
-                collected_songs.append(s)
-                return True
-
-            max_len = max(len(pri_songs), len(sec_songs), len(trd_songs))
-            for idx in range(max_len):
-                if idx < len(pri_songs): _add_song(pri_songs[idx], f"Theo gu: {primary_q}")
+            pri_songs = PLATFORMS[platform].search(primary_q, limit=limit + 5)
+            for s in pri_songs:
                 if len(collected_songs) >= limit: break
-                if idx < len(trd_songs): _add_song(trd_songs[idx], "Thịnh hành BXH")
-                if len(collected_songs) >= limit: break
-                if idx < len(sec_songs): _add_song(sec_songs[idx], f"Gợi ý: {sec_q}")
-                if len(collected_songs) >= limit: break
+                _add_song(s, f"Theo gu: {primary_q}")
+        except Exception as ex_p:
+            print(f"[Rec] Search primary '{primary_q}' error: {ex_p}")
 
-            for pool, reas in [(pri_songs, "Gợi ý"), (sec_songs, "Khám phá"), (trd_songs, "Xu hướng")]:
-                for s in pool:
+        # 2. Nếu chưa đủ 10 bài, lấy thêm theo từ khóa gợi ý phụ
+        if len(collected_songs) < limit and sec_q and sec_q != primary_q:
+            try:
+                sec_songs = PLATFORMS[platform].search(sec_q, limit=limit - len(collected_songs) + 2)
+                for s in sec_songs:
                     if len(collected_songs) >= limit: break
-                    _add_song(s, reas)
+                    _add_song(s, f"Gợi ý: {sec_q}")
+            except Exception: pass
 
-            if len(collected_songs) < limit:
-                try:
-                    for s in _fetch_trend(15):
-                        if len(collected_songs) >= limit: break
-                        _add_song(s, "Thịnh hành")
-                except Exception:
-                    pass
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        # 3. Dự phòng cuối nếu vẫn chưa đủ 10 bài: lấy từ trending
+        if len(collected_songs) < limit:
+            try:
+                trd_songs = PLATFORMS[platform].get_trending(limit=limit - len(collected_songs))
+                for s in trd_songs:
+                    if len(collected_songs) >= limit: break
+                    _add_song(s, "Thịnh hành")
+            except Exception: pass
 
         final_songs = collected_songs[:limit]
 

@@ -38,7 +38,7 @@ def _innertube_search(query: str, limit: int = 20) -> list:
         "context": {
             "client": {
                 "clientName": "WEB",
-                "clientVersion": "2.20230515.01.00",
+                "clientVersion": "2.20240401.01.00",
                 "hl": "vi",
                 "gl": "VN"
             }
@@ -53,7 +53,7 @@ def _innertube_search(query: str, limit: int = 20) -> list:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         }
     )
-    with urllib.request.urlopen(req, timeout=3.5) as resp:
+    with urllib.request.urlopen(req, timeout=6.0) as resp:
         res_data = json.loads(resp.read().decode("utf-8"))
 
     items = []
