@@ -804,10 +804,7 @@ def stream_audio(platform: str, song_id: str):
         )
 
     # 3. Phát trực tiếp qua FFmpeg Pipe: Sub-50ms latency, 0% CPU spike, tự động đệm vào SSD cache
-    headers_str = "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)\r\n"
     ref = _get_referer(platform)
-    if ref:
-        headers_str += f"Referer: {ref}\r\n"
 
     cmd = [
         "ffmpeg",
@@ -816,7 +813,10 @@ def stream_audio(platform: str, song_id: str):
         "-loglevel", "error",
         "-probesize", "32768",
         "-analyzeduration", "200000",
+        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
     ]
+    if ref:
+        cmd.extend(["-referer", ref])
     if not is_m3u8:
         cmd.extend([
             "-reconnect", "1",
@@ -828,10 +828,9 @@ def stream_audio(platform: str, song_id: str):
             "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
         ])
     cmd.extend([
-        "-headers", headers_str,
         "-i", audio_url,
         "-vn",
-        "-af", "volume=0.80",
+        "-af", "volume=0.85",
         "-acodec", "libmp3lame",
         "-b:a", "128k",
         "-ar", "44100",
@@ -856,7 +855,7 @@ def stream_audio(platform: str, song_id: str):
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, bufsize=32768)
             print(f"[Stream-Pipe] Started live stream pipe for {cache_key}")
             while True:
-                chunk = proc.stdout.read(16384)
+                chunk = proc.stdout.read(4096)
                 if not chunk:
                     break
                 if f_cache:
@@ -864,11 +863,10 @@ def stream_audio(platform: str, song_id: str):
                     except Exception: pass
                 yield chunk
 
-            proc.wait()
             if f_cache:
                 f_cache.close()
                 f_cache = None
-                if proc.returncode == 0 and tmp_mp3.exists() and tmp_mp3.stat().st_size > 20000:
+                if tmp_mp3.exists() and tmp_mp3.stat().st_size > 20000:
                     if final_mp3.exists():
                         try: final_mp3.unlink()
                         except Exception: pass
@@ -881,9 +879,14 @@ def stream_audio(platform: str, song_id: str):
             if f_cache and not f_cache.closed:
                 try: f_cache.close()
                 except Exception: pass
-            if proc and proc.poll() is None:
-                try: proc.kill()
+            if proc:
+                try: proc.stdout.close()
                 except Exception: pass
+                if proc.poll() is None:
+                    try:
+                        proc.terminate()
+                        proc.kill()
+                    except Exception: pass
 
     return Response(
         stream_with_context(generate_pipe()),
