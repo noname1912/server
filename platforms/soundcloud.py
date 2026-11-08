@@ -36,12 +36,12 @@ _SC_CLIENT_IDS = [
     "39AVoiZVrdvJEMFLH8T0c5WGshQaAPRJ",
 ]
 
-# Đọc client_id đã lưu từ file nếu có
+# Đọc client_id đã lưu từ file nếu có (thêm vào cuối để ưu tiên CID mặc định đang hoạt động tốt)
 if _CID_FILE.exists():
     try:
         saved_cid = _CID_FILE.read_text(encoding="utf-8").strip()
         if len(saved_cid) == 32 and saved_cid not in _SC_CLIENT_IDS:
-            _SC_CLIENT_IDS.insert(0, saved_cid)
+            _SC_CLIENT_IDS.append(saved_cid)
     except Exception:
         pass
 

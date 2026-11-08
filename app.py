@@ -912,21 +912,19 @@ def stream_audio(platform: str, song_id: str):
                 pass
 
         # Lấy stream URL gốc (đồng bộ hóa chống gọi trùng lặp giữa background worker và stream request)
-        # Trong khi chờ resolve URL (nếu chưa có trong cache), nhả thêm silence frames mỗi 40ms để giữ ấm buffer ESP32 và socket
+        # Trong khi chờ resolve URL (nếu chưa có trong cache), nhả liên tục silence frames mỗi 45ms để giữ ấm buffer ESP32 và socket
         audio_url = None
-        for _ in range(40): # Tối đa 2.0s
+        start_wait = time.time()
+        while time.time() - start_wait < 8.0:
             with _cache_lock:
                 if cache_key in _stream_cache:
                     audio_url = _stream_cache[cache_key]
                     break
-            audio_url = _resolve_url_sync(platform, song_id, timeout=0.05)
+            audio_url = _resolve_url_sync(platform, song_id, timeout=0.08)
             if audio_url:
                 break
             yield mp3_silence_frame * 2
-            time.sleep(0.04)
-
-        if not audio_url:
-            audio_url = _resolve_url_sync(platform, song_id, timeout=8.0)
+            time.sleep(0.045)
 
         if not audio_url:
             print(f"[Stream] Cannot get stream URL for {cache_key}")
@@ -1021,15 +1019,20 @@ def stream_audio(platform: str, song_id: str):
                 if seg_urls and init_url:
                     i_bytes = init_bytes
                     s0_bytes = seg0_bytes
-                    if not i_bytes:
-                        req_i = urllib.request.Request(init_url, headers={"User-Agent": "Mozilla/5.0"})
-                        with urllib.request.urlopen(req_i, timeout=5.0) as r:
-                            i_bytes = r.read()
-
-                    if not s0_bytes:
-                        req_s0 = urllib.request.Request(seg_urls[0], headers={"User-Agent": "Mozilla/5.0"})
-                        with urllib.request.urlopen(req_s0, timeout=5.0) as r:
-                            s0_bytes = r.read()
+                    if not i_bytes or not s0_bytes:
+                        import concurrent.futures
+                        def _fetch_part(u):
+                            try:
+                                r_req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+                                with urllib.request.urlopen(r_req, timeout=5.0) as r:
+                                    return r.read()
+                            except Exception:
+                                return b""
+                        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as dl_exec:
+                            fut_i = dl_exec.submit(_fetch_part, init_url) if not i_bytes else None
+                            fut_s = dl_exec.submit(_fetch_part, seg_urls[0]) if not s0_bytes else None
+                            if fut_i: i_bytes = fut_i.result()
+                            if fut_s: s0_bytes = fut_s.result()
 
                     ff_cmd = [
                         "ffmpeg",
