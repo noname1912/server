@@ -2554,7 +2554,8 @@ def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 1_800_000) -> bytes:
             append_images=frames[1:],
             duration=durations,
             loop=0,
-            optimize=True
+            optimize=False,
+            disposal=2
         )
         res = out.getvalue()
         if len(res) <= max_bytes or attempt == 2:
@@ -2590,27 +2591,35 @@ def upload_wallpaper():
 
     try:
         if is_gif:
-            # ── GIF động: Tự động nén & tối ưu frame 320x240 để lưu thẻ nhớ / SPIFFS ──
+            # ── GIF động: Luôn tối ưu hoá frame 320x240 (full frame disposal=2) để lưu thẻ nhớ / SPIFFS ──
             raw = file.read()
             orig_len = len(raw)
-            if orig_len > 1_800_000:
-                print(f"[Wallpaper] GIF lớn ({orig_len//1024} KB). Đang tự động nén & tối ưu 320x240...")
-                try:
-                    raw = _optimize_gif_for_esp32(raw, max_bytes=1_800_000)
-                    print(f"[Wallpaper] GIF nén thành công: {orig_len//1024} KB -> {len(raw)//1024} KB")
-                except Exception as ex_opt:
-                    print(f"[Wallpaper] Lỗi tự động nén GIF: {ex_opt}")
-                    if len(raw) > 1_850_000:
-                        return jsonify({
-                            "status": "error",
-                            "message": f"GIF quá lớn ({orig_len//1024} KB). Tự động nén thất bại: {ex_opt}"
-                        }), 400
+            print(f"[Wallpaper] Đang chuẩn hoá & tối ưu GIF ({orig_len//1024} KB) cho màn hình TFT ESP32...")
+            try:
+                raw = _optimize_gif_for_esp32(raw, max_bytes=1_800_000)
+                print(f"[Wallpaper] GIF chuẩn hoá thành công: {orig_len//1024} KB -> {len(raw)//1024} KB")
+            except Exception as ex_opt:
+                print(f"[Wallpaper] Lỗi tự động nén GIF: {ex_opt}")
+                if len(raw) > 1_850_000:
+                    return jsonify({
+                        "status": "error",
+                        "message": f"GIF quá lớn ({orig_len//1024} KB). Tự động nén thất bại: {ex_opt}"
+                    }), 400
 
-            # Lưu GIF gốc / đã tối ưu
+            # Lưu GIF đã tối ưu 320x240
             WALLPAPER_GIF.write_bytes(raw)
-            # Xoá ảnh tĩnh cũ (tiết kiệm SPIFFS)
-            if WALLPAPER_BIN.exists():
-                WALLPAPER_BIN.unlink()
+
+            # Tạo wallpaper.bin từ frame đầu tiên của GIF để ESP32 khôi phục nền chữ chạy trong suốt 100%
+            try:
+                img_frame0 = Image.open(BytesIO(raw))
+                img_frame0.seek(0)
+                img_frame0 = img_frame0.convert("RGB").resize((320, 240), _LANCZOS)
+                img_frame0 = _enhance_image_for_tft(img_frame0, preset)
+                bin_data = _image_to_rgb565_dithered(img_frame0)
+                WALLPAPER_BIN.write_bytes(bin_data)
+                print(f"[Wallpaper] Đã tạo wallpaper.bin ({len(bin_data)} bytes) từ frame 0 GIF")
+            except Exception as be:
+                print(f"[Wallpaper] Warning: Không tạo được wallpaper.bin từ frame 0 GIF: {be}")
 
             # Tạo preview JPEG từ frame đầu
             try:
@@ -2680,7 +2689,20 @@ def upload_wallpaper():
 
 @app.route("/api/wallpaper", methods=["GET"])
 def get_wallpaper():
-    """Phục vụ file RGB565 binary cho ESP32 (ảnh tĩnh)"""
+    """Phục vụ file RGB565 binary cho ESP32 (ảnh tĩnh hoặc frame 0 của GIF để phục hồi nền chữ chạy)"""
+    if not WALLPAPER_BIN.exists() and WALLPAPER_GIF.exists():
+        try:
+            print("[Wallpaper] Tự động tạo wallpaper.bin từ frame 0 GIF hiện tại...")
+            im = Image.open(str(WALLPAPER_GIF))
+            im.seek(0)
+            im = im.convert("RGB").resize((320, 240), _LANCZOS)
+            im = _enhance_image_for_tft(im, "original")
+            bin_data = _image_to_rgb565_dithered(im)
+            WALLPAPER_BIN.write_bytes(bin_data)
+            print(f"[Wallpaper] Đã tạo thành công wallpaper.bin ({len(bin_data)} bytes)")
+        except Exception as e:
+            print(f"[Wallpaper] Lỗi tự động tạo bin từ GIF: {e}")
+
     if not WALLPAPER_BIN.exists():
         abort(404)
     return send_file(str(WALLPAPER_BIN), mimetype="application/octet-stream")
@@ -2707,6 +2729,17 @@ def get_wallpaper_info():
     """Trạng thái ảnh nền hiện tại"""
     cfg = _load_wallpaper_config()
     is_gif = WALLPAPER_GIF.exists()
+    if is_gif and not WALLPAPER_BIN.exists():
+        try:
+            im = Image.open(str(WALLPAPER_GIF))
+            im.seek(0)
+            im = im.convert("RGB").resize((320, 240), _LANCZOS)
+            im = _enhance_image_for_tft(im, "original")
+            bin_data = _image_to_rgb565_dithered(im)
+            WALLPAPER_BIN.write_bytes(bin_data)
+        except Exception as e:
+            print(f"[Wallpaper] Lỗi tự động tạo bin từ GIF: {e}")
+
     has_static = WALLPAPER_BIN.exists()
     available = is_gif or has_static
     if is_gif:
