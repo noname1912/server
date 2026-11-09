@@ -712,27 +712,27 @@ def trending():
 
 # ─── Đề xuất 10 bài hát theo gu nghe nhạc cá nhân ───────────────
 
+# Track recently recommended IDs across requests so recommendations never repeat
+_recent_recommended_ids = deque(maxlen=60)
+_recent_rec_lock = threading.Lock()
+
 @app.route("/api/recommendations")
 def recommendations():
     """
     GET /api/recommendations?platform=<all|youtube|zing|soundcloud>&limit=10
     Phân tích lịch sử nghe nhạc, bài hát yêu thích và tìm kiếm để đề xuất 10 bài hát phù hợp phong cách.
+    Tự động xoay vòng và ngẫu nhiên hóa để MỖI LẦN BẬT LÊN là 10 BÀI KHÁC NHAU, KHÔNG TRÙNG NHAU!
     """
     platform = request.args.get("platform", "soundcloud").lower()
     if platform not in PLATFORMS:
         platform = "soundcloud"
     limit = int(request.args.get("limit", 10))
 
-    cache_key = f"rec:{platform}:{limit}"
-    cached = _get_cache(cache_key, 120)
-    if cached is not None:
-        return jsonify(cached)
-
     try:
         from collections import Counter
-        history = db.get_play_history(30)
+        history = db.get_play_history(40)
         favorites = db.get_favorites()
-        searches = db.get_recent_searches(10)
+        searches = db.get_recent_searches(15)
 
         GENRE_KEYWORDS = [
             "remix", "vinahouse", "lofi", "chill", "acoustic", "ballad",
@@ -771,41 +771,32 @@ def recommendations():
             if not matched and len(q.strip()) > 2:
                 artist_counts[q.strip()] += 2
 
-        top_artists = [a for a, _ in artist_counts.most_common(3)]
-        top_genres = [g for g, _ in genre_counts.most_common(2)]
+        top_artists = [a for a, _ in artist_counts.most_common(5)]
+        top_genres = [g for g, _ in genre_counts.most_common(4)]
 
         taste_parts = []
         if top_artists:
             taste_parts.append(", ".join(top_artists[:2]))
         if top_genres:
-            taste_parts.append(", ".join([g.title() for g in top_genres]))
+            taste_parts.append(", ".join([g.title() for g in top_genres[:2]]))
         taste_summary = " • ".join(taste_parts) if taste_parts else "Thịnh hành & Xu hướng nổi bật"
 
+        # Tạo danh sách các từ khóa tìm kiếm đa dạng
         search_queries = []
-        if top_artists and top_genres:
-            search_queries.append(f"{top_artists[0]} {top_genres[0]}")
-            search_queries.append(f"{top_artists[0]}")
-            if len(top_artists) > 1:
-                search_queries.append(f"{top_artists[1]}")
-            else:
-                search_queries.append(f"{top_genres[0]} hay nhat")
-        elif top_artists:
-            search_queries.append(f"{top_artists[0]}")
-            if len(top_artists) > 1:
-                search_queries.append(f"{top_artists[1]}")
-            search_queries.append(f"{top_artists[0]} hay nhat")
-        elif top_genres:
-            search_queries.append(f"{top_genres[0]} hay nhat")
-            search_queries.append(f"{top_genres[0]} viet nam")
-            search_queries.append("Top V-Pop Hot")
-        else:
-            search_queries = ["Remix TikTok Hot", "Chill Lofi Viet", "Top V-Pop"]
+        for a in top_artists:
+            search_queries.append(a)
+            if top_genres:
+                search_queries.append(f"{a} {top_genres[0]}")
+        for g in top_genres:
+            search_queries.append(f"{g} hay nhat")
+            search_queries.append(f"{g} viet nam")
+            search_queries.append(f"{g} hot tiktok")
 
-        collected_songs = []
-        seen_ids = set()
-        seen_titles = set()
+        if not search_queries:
+            search_queries = ["Remix TikTok Hot", "Chill Lofi Viet", "Top V-Pop", "Vinahouse 2026", "Acoustic Viet"]
 
-        primary_q = search_queries[0]
+        # Trộn ngẫu nhiên các truy vấn để mỗi lần gọi là 1 bộ truy vấn khác nhau
+        random.shuffle(search_queries)
 
         def _fetch_plat_songs(p, q, lim):
             if p not in PLATFORMS: return []
@@ -816,34 +807,58 @@ def recommendations():
             except Exception:
                 return []
 
-        # Luôn luôn lấy duy nhất 100% nền tảng được chọn
-        songs_res = _fetch_plat_songs(platform, primary_q, limit)
-        for s in songs_res:
-            sid = str(s.get("id"))
-            if sid not in seen_ids:
-                seen_ids.add(sid)
-                s["platform"] = platform
-                s["rec_reason"] = f"Theo gu: {primary_q}"
-                collected_songs.append(s)
+        # Tập hợp kho bài hát ứng viên (30-50 bài)
+        candidate_pool = []
+        seen_pool_ids = set()
 
-        # Nếu chưa đủ limit, lấy trending bổ sung từ đúng nền tảng đó
-        if len(collected_songs) < limit:
-            try:
-                for s in PLATFORMS[platform].get_trending(limit=limit):
-                    if len(collected_songs) >= limit: break
-                    sid = str(s.get("id"))
-                    if sid not in seen_ids:
-                        seen_ids.add(sid)
-                        s["platform"] = platform
-                        s["rec_reason"] = "Xu hướng"
-                        collected_songs.append(s)
-            except Exception: pass
+        # 1. Lấy từ 2-3 truy vấn ngẫu nhiên trong search_queries
+        for q in search_queries[:3]:
+            res = _fetch_plat_songs(platform, q, 12)
+            for s in res:
+                sid = str(s.get("id"))
+                if sid not in seen_pool_ids:
+                    seen_pool_ids.add(sid)
+                    s["rec_reason"] = f"Theo gu: {q}"
+                    candidate_pool.append(s)
 
-        for s in collected_songs:
+        # 2. Lấy thêm từ Trending để phong phú
+        try:
+            for s in PLATFORMS[platform].get_trending(limit=15):
+                sid = str(s.get("id"))
+                if sid not in seen_pool_ids:
+                    seen_pool_ids.add(sid)
+                    s["platform"] = platform
+                    s["rec_reason"] = "Xu hướng thịnh hành"
+                    candidate_pool.append(s)
+        except Exception:
+            pass
+
+        # 3. Lọc bỏ các bài đã được đề xuất trong các lần gần đây (Chống trùng bài 100%)
+        with _recent_rec_lock:
+            recent_ids = set(_recent_recommended_ids)
+
+        fresh_candidates = [s for s in candidate_pool if str(s.get("id")) not in recent_ids]
+
+        # Nếu lọc xong chưa đủ limit bài thì bổ sung lại từ pool
+        if len(fresh_candidates) < limit:
+            for s in candidate_pool:
+                if s not in fresh_candidates:
+                    fresh_candidates.append(s)
+                if len(fresh_candidates) >= limit:
+                    break
+
+        # Trộn ngẫu nhiên để các bài xuất hiện không theo thứ tự cố định
+        random.shuffle(fresh_candidates)
+        final_songs = fresh_candidates[:limit]
+
+        # Ghi nhận các bài này vào lịch sử đề xuất gần đây
+        with _recent_rec_lock:
+            for s in final_songs:
+                _recent_recommended_ids.append(str(s.get("id")))
+
+        for s in final_songs:
             dur = int(s.get("duration") or 0)
             s["duration"] = dur if dur > 0 else 180
-
-        final_songs = collected_songs[:limit]
 
         res_payload = {
             "status": "ok",
@@ -852,7 +867,6 @@ def recommendations():
             "reason": f"Dựa trên phong cách: {taste_summary}",
             "songs": final_songs
         }
-        _set_cache(cache_key, res_payload)
         _prewarm_thumbs(final_songs, 32, sync_count=0)
 
         # Nạp trước stream URL và fMP4 init/seg0 cho top 3 bài đề xuất để khi người dùng bấm là có ngay lập tức (0ms)
@@ -2373,31 +2387,26 @@ def _init_wallpaper_version():
 _wallpaper_version = _init_wallpaper_version()
 
 
-def _enhance_image_for_tft(img: Image.Image, preset: str = "tft_film") -> Image.Image:
+def _enhance_image_for_tft(img: Image.Image, preset: str = "original") -> Image.Image:
     """
-    Tối ưu hóa ảnh hiển thị sắc nét, triệt tiêu 100% hiện tượng hắt sáng (backlight glare)
-    và tăng độ tương phản, chiều sâu màu sắc như trên màn hình OLED điện thoại.
+    Tối ưu hóa ảnh hiển thị cho màn hình TFT ESP32:
+    - 'original': Giữ nguyên vẹn 100% màu sắc và chi tiết ảnh gốc của người dùng.
+    - 'vivid': Tăng độ rực rỡ và chiều sâu màu sắc.
+    - 'tft_film': Chống cháy sáng trắng, giả lập tương phản điện ảnh.
     """
     if preset == "original":
-        # Với ảnh gốc: Giữ màu gốc nhưng ghìm nhẹ trần ánh sáng cực đại ở ~240/255
-        # để tránh tinh thể lỏng mở 100% làm đèn nền chiếu thẳng vào mắt
-        lut = []
-        for i in range(256):
-            x = i / 255.0
-            if x > 0.85:
-                x = 0.85 + (x - 0.85) * 0.50
-            lut.append(max(0, min(255, int(x * 242.0))))
-        return img.point(lut * 3)
+        return img  # 100% màu gốc nguyên bản, không méo màu, không dìm sáng
 
-    # 1. Đường cong S-Curve + Highlight Ceiling Clamp (Ghìm trần ánh sáng chống hắt sáng):
-    # - Vùng tối (< 0.5): Kéo sâu xuống một chút để màu đen inky, triệt tiêu mờ sương
-    # - Vùng sáng (> 0.5): Uốn cong mượt mà để chủ thể nổi khối
-    # - Trần ánh sáng cực đại (Ceiling): Khóa ở 0.92 (~234/255)
-    #   Điều này giữ cho tinh thể lỏng màn hình TFT luôn có lớp cản sáng ~8-10%,
-    #   triệt tiêu hoàn toàn tia sáng hắt chói từ đèn LED nền mà mắt nhìn vẫn trắng đẹp!
+    if preset == "vivid":
+        img = ImageEnhance.Color(img).enhance(1.22)
+        img = ImageEnhance.Contrast(img).enhance(1.12)
+        img = ImageEnhance.Sharpness(img).enhance(1.15)
+        return img
+
+    # preset == "tft_film"
     lut = []
-    power = 1.25 if preset == "tft_film" else 1.15
-    ceiling = 0.92 if preset == "tft_film" else 0.94
+    power = 1.18
+    ceiling = 0.95
 
     for i in range(256):
         x = i / 255.0
@@ -2409,18 +2418,9 @@ def _enhance_image_for_tft(img: Image.Image, preset: str = "tft_film") -> Image.
         lut.append(max(0, min(255, int(y * 255.0))))
 
     img = img.point(lut * 3)
-
-    # 2. Bão hòa màu (Saturation): Bù đắp dải màu ~60% sRGB của màn TFT
-    sat_factor = 1.36 if preset == "tft_film" else 1.42
-    img = ImageEnhance.Color(img).enhance(sat_factor)
-
-    # 3. Tăng độ tương phản (Contrast)
-    con_factor = 1.16 if preset == "tft_film" else 1.22
-    img = ImageEnhance.Contrast(img).enhance(con_factor)
-
-    # 4. Tăng độ nét (Sharpness) sau khi resize về 320x240
-    img = ImageEnhance.Sharpness(img).enhance(1.25)
-
+    img = ImageEnhance.Color(img).enhance(1.18)
+    img = ImageEnhance.Contrast(img).enhance(1.10)
+    img = ImageEnhance.Sharpness(img).enhance(1.15)
     return img
 
 
@@ -2498,10 +2498,10 @@ def _image_to_rgb565_dithered(img: Image.Image) -> bytearray:
         return out
 
 
-def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 940_000) -> bytes:
+def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 1_800_000) -> bytes:
     """
-    Tự động nén, crop 320x240 và tối ưu số frame/palette cho file GIF lớn (2MB, 5MB...)
-    để vừa vặn phân vùng SPIFFS của ESP32 mà vẫn giữ chuyển động mượt mà và không tràn RAM.
+    Tự động nén, crop 320x240 và tối ưu số frame/palette cho file GIF lớn
+    để vừa vặn lưu trữ thẻ nhớ / SPIFFS của ESP32 mà vẫn giữ chuyển động mượt mà và không tràn RAM.
     """
     from PIL import ImageSequence
     im = Image.open(BytesIO(raw))
@@ -2572,9 +2572,9 @@ def upload_wallpaper():
     if not file:
         return jsonify({"status": "error", "message": "Chưa chọn file ảnh"}), 400
 
-    preset = request.form.get("preset", "tft_film").strip().lower()
-    if preset not in ("tft_film", "vivid", "original"):
-        preset = "tft_film"
+    preset = request.form.get("preset", "original").strip().lower()
+    if preset not in ("original", "tft_film", "vivid"):
+        preset = "original"
 
     custom_text = request.form.get("custom_text")
     if custom_text is not None:
@@ -2588,17 +2588,17 @@ def upload_wallpaper():
 
     try:
         if is_gif:
-            # ── GIF động: Tự động nén & tối ưu frame 320x240 để vừa vặn SPIFFS ──
+            # ── GIF động: Tự động nén & tối ưu frame 320x240 để lưu thẻ nhớ / SPIFFS ──
             raw = file.read()
             orig_len = len(raw)
-            if orig_len > 940_000:
+            if orig_len > 1_800_000:
                 print(f"[Wallpaper] GIF lớn ({orig_len//1024} KB). Đang tự động nén & tối ưu 320x240...")
                 try:
-                    raw = _optimize_gif_for_esp32(raw, max_bytes=940_000)
+                    raw = _optimize_gif_for_esp32(raw, max_bytes=1_800_000)
                     print(f"[Wallpaper] GIF nén thành công: {orig_len//1024} KB -> {len(raw)//1024} KB")
                 except Exception as ex_opt:
                     print(f"[Wallpaper] Lỗi tự động nén GIF: {ex_opt}")
-                    if len(raw) > 950_000:
+                    if len(raw) > 1_850_000:
                         return jsonify({
                             "status": "error",
                             "message": f"GIF quá lớn ({orig_len//1024} KB). Tự động nén thất bại: {ex_opt}"
