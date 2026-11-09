@@ -2502,7 +2502,7 @@ def _image_to_rgb565_dithered(img: Image.Image) -> bytearray:
 
 def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 1_800_000) -> bytes:
     """
-    Tự động nén, crop 320x240 và tối ưu số frame/palette cho file GIF lớn
+    Tự động nén, crop 320x240 và tối ưu số frame/palette cho file GIF
     để vừa vặn lưu trữ thẻ nhớ / SPIFFS của ESP32 mà vẫn giữ chuyển động mượt mà và không tràn RAM.
     """
     from PIL import ImageSequence
@@ -2525,7 +2525,14 @@ def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 1_800_000) -> bytes:
         frames = []
         durations = []
         for i in range(0, total_f, step):
-            f = orig_frames[i].convert("RGB")
+            frame = orig_frames[i]
+            # Chuyển đổi khung hình an toàn sang RGB thuần (ghép nền đen nếu có kênh alpha)
+            f = Image.new("RGB", frame.size, (0, 0, 0))
+            if frame.mode == "RGBA":
+                f.paste(frame, mask=frame.split()[3])
+            else:
+                f.paste(frame.convert("RGB"))
+
             w, h = f.size
             cur_ratio = w / float(h)
             if cur_ratio > target_ratio:
@@ -2540,7 +2547,7 @@ def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 1_800_000) -> bytes:
             f = f.resize((target_w, target_h), _LANCZOS)
             f_p = f.quantize(colors=colors, method=_NEAREST)
             frames.append(f_p)
-            dur = max(33, int(im.info.get("duration", 80) * step))
+            dur = max(40, int(frame.info.get("duration", 80) * step))
             durations.append(dur)
 
         if not frames:
@@ -2553,9 +2560,7 @@ def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 1_800_000) -> bytes:
             save_all=True,
             append_images=frames[1:],
             duration=durations,
-            loop=0,
-            optimize=False,
-            disposal=2
+            loop=0
         )
         res = out.getvalue()
         if len(res) <= max_bytes or attempt == 2:
@@ -2565,6 +2570,33 @@ def _optimize_gif_for_esp32(raw: bytes, max_bytes: int = 1_800_000) -> bytes:
         colors = 64
 
     return res
+
+
+def _ensure_wallpaper_gif_320x240():
+    """Tự động kiểm tra file clock_wallpaper.gif hiện tại, nếu chưa đúng chuẩn 320x240 thì tối ưu lại ngay"""
+    global _wallpaper_version
+    if not WALLPAPER_GIF.exists():
+        return
+    try:
+        im = Image.open(str(WALLPAPER_GIF))
+        if im.size != (320, 240):
+            print(f"[Wallpaper] Phát hiện GIF cũ {im.size} != (320, 240). Đang tự động chuẩn hoá 320x240...")
+            raw = WALLPAPER_GIF.read_bytes()
+            new_gif = _optimize_gif_for_esp32(raw)
+            WALLPAPER_GIF.write_bytes(new_gif)
+            print(f"[Wallpaper] Chuẩn hoá GIF thành công: {len(new_gif)} bytes (320x240)!")
+
+            # Tạo wallpaper.bin từ frame 0
+            img0 = Image.open(BytesIO(new_gif))
+            img0.seek(0)
+            img0 = img0.convert("RGB").resize((320, 240), _LANCZOS)
+            bin_data = _image_to_rgb565_dithered(img0)
+            WALLPAPER_BIN.write_bytes(bin_data)
+
+            _wallpaper_version = int(time.time())
+            print(f"[Wallpaper] Đã cập nhật version: {_wallpaper_version}")
+    except Exception as e:
+        print(f"[Wallpaper] Lỗi tự động kiểm tra GIF: {e}")
 
 
 @app.route("/api/wallpaper/upload", methods=["POST"])
@@ -2727,6 +2759,7 @@ def get_wallpaper_preview():
 @app.route("/api/wallpaper/info", methods=["GET"])
 def get_wallpaper_info():
     """Trạng thái ảnh nền hiện tại"""
+    _ensure_wallpaper_gif_320x240()
     cfg = _load_wallpaper_config()
     is_gif = WALLPAPER_GIF.exists()
     if is_gif and not WALLPAPER_BIN.exists():
